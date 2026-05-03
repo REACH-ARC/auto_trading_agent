@@ -313,8 +313,8 @@ class TestScanCycle:
 
     @pytest.mark.asyncio
     async def test_returns_result_for_actionable_signal(self):
-        await update_symbol_data(_make_ohlcv("EURUSD"))
-        signal = _make_buy_signal("EURUSD", confidence=80)
+        await update_symbol_data(_make_ohlcv("EURUSDc"))
+        signal = _make_buy_signal("EURUSDc", confidence=80)
         indicators = _make_indicators()
         risk = _approved_risk()
 
@@ -323,7 +323,7 @@ class TestScanCycle:
             results = await scan_cycle()
 
         assert len(results) == 1
-        assert results[0].symbol == "EURUSD"
+        assert results[0].symbol == "EURUSDc"
         assert results[0].signal.direction == "BUY"
 
     @pytest.mark.asyncio
@@ -354,10 +354,10 @@ class TestScanCycle:
 
     @pytest.mark.asyncio
     async def test_results_sorted_by_confluence_score_descending(self):
-        for sym in ("EURUSD", "XAUUSD", "GBPUSD"):
+        for sym in ("EURUSDc", "XAUUSDc", "GBPUSDc"):
             await update_symbol_data(_make_ohlcv(sym))
 
-        confidence_map = {"EURUSD": 80, "XAUUSD": 90, "GBPUSD": 70}
+        confidence_map = {"EURUSDc": 80, "XAUUSDc": 90, "GBPUSDc": 70}
 
         async def _fake_check(*args, **kwargs):
             return False, []
@@ -380,7 +380,7 @@ class TestScanCycle:
         assert len(results) == 3
         scores = [r.confluence_score for r in results]
         assert scores == sorted(scores, reverse=True)
-        assert results[0].symbol == "XAUUSD"  # highest confidence = highest score
+        assert results[0].symbol == "XAUUSDc"  # highest confidence = highest score
 
     @pytest.mark.asyncio
     async def test_indicator_error_skips_symbol(self):
@@ -412,8 +412,8 @@ class TestScanCycle:
 
     @pytest.mark.asyncio
     async def test_scan_result_has_signal_id(self):
-        await update_symbol_data(_make_ohlcv("EURUSD"))
-        signal = _make_buy_signal()
+        await update_symbol_data(_make_ohlcv("EURUSDc"))
+        signal = _make_buy_signal("EURUSDc")
         indicators = _make_indicators()
         risk = _approved_risk()
 
@@ -425,9 +425,9 @@ class TestScanCycle:
 
     @pytest.mark.asyncio
     async def test_fresh_data_respected_over_stale_threshold(self):
-        fresh = _make_ohlcv("EURUSD", age_minutes=5)
+        fresh = _make_ohlcv("EURUSDc", age_minutes=5)
         await update_symbol_data(fresh)
-        signal = _make_buy_signal()
+        signal = _make_buy_signal("EURUSDc")
         indicators = _make_indicators()
         risk = _approved_risk()
 
@@ -450,8 +450,8 @@ class TestScheduledScan:
 
     @pytest.mark.asyncio
     async def test_callback_called_for_top_signal(self):
-        await update_symbol_data(_make_ohlcv("EURUSD"))
-        signal = _make_buy_signal()
+        await update_symbol_data(_make_ohlcv("EURUSDc"))
+        signal = _make_buy_signal("EURUSDc")
         indicators = _make_indicators()
         risk = _approved_risk()
 
@@ -469,7 +469,7 @@ class TestScheduledScan:
         callback.assert_called_once()
         result_arg = callback.call_args[0][0]
         assert isinstance(result_arg, ScanResult)
-        assert result_arg.symbol == "EURUSD"
+        assert result_arg.symbol == "EURUSDc"
 
     @pytest.mark.asyncio
     async def test_callback_not_called_when_no_signals(self):
@@ -497,7 +497,7 @@ class TestScheduledScan:
     @pytest.mark.asyncio
     async def test_only_top_n_signals_dispatched(self):
         """scanner.top_signals_per_cycle=1 → callback called exactly once even with 3 symbols."""
-        for sym in ("EURUSD", "XAUUSD", "GBPUSD"):
+        for sym in ("EURUSDc", "XAUUSDc", "GBPUSDc"):
             await update_symbol_data(_make_ohlcv(sym))
 
         async def _fake_check(*args, **kwargs):

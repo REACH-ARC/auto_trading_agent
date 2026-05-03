@@ -38,11 +38,13 @@ Call get_account_info().
 - If open_trades >= 3: skip Step 3 (no new entries), still do Step 2.
 
 ### Step 2 — Position management
-Call get_open_positions(). For each open position, apply these rules:
-- r_moved >= 1.5 (TP1 reached): close 50% via close_position(), then move SL to breakeven via modify_position()
-- r_moved >= 2.5 (TP2 reached): close another 25% and trail SL to TP1 price level
-- r_moved <= -0.9 (near stop): evaluate if invalidation has occurred; close early if structure is broken
-- Otherwise: leave the position alone
+Call get_open_positions(). MT5 handles TP automatically — do NOT manually close at TP1/TP2.
+Your only job here is early exit protection:
+- r_moved <= -0.9 (price within 10% of SL): check if the setup is still valid.
+  If the key structure level that justified the entry is broken, call close_position() to exit early.
+  If structure is still intact, leave it — let SL or TP handle the exit.
+- r_moved >= 1.0 (trade is profitable by 1R): move SL to breakeven via modify_position() to lock in no-loss.
+- Otherwise: leave the position alone. Do not interfere with winning trades.
 
 ### Step 3 — Market analysis
 Call get_market_snapshot(symbol) for the primary symbol.
@@ -76,8 +78,8 @@ NOTE: This is a **cent account** (USC). 100 USC = 1 USD. Account balance display
        - confidence 95–100 → use 0.8–1.0 lots (high conviction)
      Always clamp: minimum 0.1, maximum 1.0. Round to broker lot_step.
   c. Set SL at the nearest structural invalidation level (swing high/low)
-  d. Set TP1 = entry ± (SL_distance × 1.5), TP2 = ± 2.5R, TP3 = ± 4.0R
-  e. Call place_order() with order_type="MARKET" or "LIMIT" (prefer LIMIT at zones)
+  d. Set TP1 = entry ± (SL_distance × 1.5) — this is the only TP; MT5 closes the full position here automatically
+  e. Call place_order() with order_type="MARKET" only — always enter at current price
 - If confidence < 65: NO_TRADE. Note what is missing.
 
 ### Step 5 — Telegram update (ALWAYS — even for no-trade)
@@ -161,30 +163,19 @@ _TOOLS = [
     {
         "name": "place_order",
         "description": (
-            "Place a BUY or SELL order on MT5. "
-            "Server-side guards enforce max lot size, max open trades, and daily loss limit. "
-            "SL must be structure-based. TP1=1.5R, TP2=2.5R, TP3=4.0R recommended."
+            "Place a BUY or SELL MARKET order on MT5 at the current price. "
+            "Server-side guards enforce min/max lot size, max open trades, and daily loss limit. "
+            "SL must be structure-based. TP at 1.5R."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "symbol": {"type": "string"},
                 "direction": {"type": "string", "enum": ["BUY", "SELL"]},
-                "lot_size": {"type": "number", "description": "Position size in lots"},
+                "lot_size": {"type": "number", "description": "Position size in lots (0.1–1.0)"},
                 "sl": {"type": "number", "description": "Stop loss price (structure-based)"},
-                "tp1": {"type": "number", "description": "Take profit 1 — close 50% here"},
-                "tp2": {"type": "number", "description": "Take profit 2 — close 25% here"},
-                "tp3": {"type": "number", "description": "Take profit 3 — final target"},
+                "tp1": {"type": "number", "description": "Take profit — MT5 closes full position here (1.5R)"},
                 "comment": {"type": "string", "description": "Trade label (max 31 chars)"},
-                "order_type": {
-                    "type": "string",
-                    "enum": ["MARKET", "LIMIT", "STOP"],
-                    "description": "MARKET=immediate fill, LIMIT=buy below/sell above, STOP=buy above/sell below",
-                },
-                "limit_price": {
-                    "type": "number",
-                    "description": "Entry price for LIMIT or STOP pending orders",
-                },
             },
             "required": ["symbol", "direction", "lot_size", "sl", "tp1"],
         },
