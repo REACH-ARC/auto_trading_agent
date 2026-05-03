@@ -1,0 +1,60 @@
+# Secrets — never commit
+.env
+
+# Database files
+*.db
+*.db-shm
+*.db-wal
+
+# Logs
+logs/
+*.log
+
+# Runtime data
+data/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pyw
+*.pyz
+.Python
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Package / build artefacts
+*.egg-info/
+dist/
+build/
+.eggs/
+pip-wheel-metadata/
+*.whl
+
+# Test / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# MQL5 / MetaTrader artefacts
+mt5_ea/*.ex5
+mt5_ea/*.bak
+mt5_ea/AutoClose/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini

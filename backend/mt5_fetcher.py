@@ -1,0 +1,231 @@
+"""
+MT5 Direct Fetcher — replaces the desktop EA.
+Connects to a running MT5 terminal via the MetaTrader5 Python package,
+detects each new M15 bar, fetches OHLCV + account state, and runs the pipeline.
+
+Requirements:
+  - MT5 terminal open on the same Windows PC (minimized is fine)
+  - Logged into your Exness cent account
+  - pip install MetaTrader5
+"""
+from __future__ import annotations
+
+import asyncio
+from datetime import datetime, timezone
+
+from loguru import logger
+
+from config import settings
+from backend.indicators import Bar, OHLCVData
+from backend.risk_manager import AccountState
+
+_TF_NAMES = ["M15", "H1", "H4", "D1"]
+
+
+def _tf_const(name: str):
+    import MetaTrader5 as mt5
+    return {
+        "M15": mt5.TIMEFRAME_M15,
+        "H1":  mt5.TIMEFRAME_H1,
+        "H4":  mt5.TIMEFRAME_H4,
+        "D1":  mt5.TIMEFRAME_D1,
+    }[name]
+
+
+def connect() -> bool:
+    """Connect to the running MT5 terminal. Returns True on success."""
+    try:
+        import MetaTrader5 as mt5
+    except ImportError:
+        logger.error("MetaTrader5 package not installed — run: pip install MetaTrader5")
+        return False
+
+    if not mt5.initialize():
+        logger.error(f"MT5 initialize() failed: {mt5.last_error()}")
+        return False
+
+    info = mt5.account_info()
+    if info is None:
+        logger.error("MT5 connected but no account — is the terminal logged in?")
+        mt5.shutdown()
+        return False
+
+    logger.info(
+        f"MT5 connected — account #{info.login} | {info.server} | "
+        f"balance={info.balance:.2f} {info.currency}"
+    )
+    return True
+
+
+def disconnect() -> None:
+    try:
+        import MetaTrader5 as mt5
+        mt5.shutdown()
+        logger.info("MT5 disconnected")
+    except ImportError:
+        pass
+
+
+def fetch_ohlcv(symbol: str, bars: int = 100) -> OHLCVData | None:
+    """Fetch M15/H1/H4/D1 bars for symbol from the MT5 terminal."""
+    import MetaTrader5 as mt5
+
+    timeframes: dict = {}
+    for tf_name in _TF_NAMES:
+        rates = mt5.copy_rates_from_pos(symbol, _tf_const(tf_name), 0, bars)
+        if rates is None or len(rates) == 0:
+            logger.warning(f"MT5: no {tf_name} data for {symbol} — {mt5.last_error()}")
+            continue
+        timeframes[tf_name] = [
+            Bar(
+                time=datetime.fromtimestamp(r["time"], tz=timezone.utc),
+                open=float(r["open"]),
+                high=float(r["high"]),
+                low=float(r["low"]),
+                close=float(r["close"]),
+                volume=float(r["tick_volume"]),
+            )
+            for r in rates
+        ]
+
+    if not timeframes:
+        logger.error(f"MT5: could not fetch any data for {symbol}")
+        return None
+
+    return OHLCVData(
+        symbol=symbol,
+        timeframes=timeframes,
+        received_at=datetime.now(timezone.utc),
+    )
+
+
+def fetch_account() -> AccountState:
+    """Return live account state from MT5."""
+    try:
+        import MetaTrader5 as mt5
+        info = mt5.account_info()
+        if info is None:
+            return AccountState(equity=10_000, balance=10_000, open_trades=0, daily_pnl=0)
+        return AccountState(
+            equity=float(info.equity),
+            balance=float(info.balance),
+            open_trades=int(mt5.positions_total() or 0),
+            daily_pnl=float(info.equity) - float(info.balance),
+        )
+    except ImportError:
+        return AccountState(equity=10_000, balance=10_000, open_trades=0, daily_pnl=0)
+
+
+def _ensure_symbol(symbol: str) -> bool:
+    """Ensure symbol is in Market Watch so data calls work."""
+    import MetaTrader5 as mt5
+    if not mt5.symbol_select(symbol, True):
+        logger.warning(f"MT5: symbol_select({symbol}) failed — {mt5.last_error()}")
+        return False
+    return True
+
+
+def _current_m15_time(symbol: str) -> datetime | None:
+    """Return the open timestamp of the current M15 bar."""
+    import MetaTrader5 as mt5
+    rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M15, 0, 1)
+    if rates is None or len(rates) == 0:
+        logger.debug(f"MT5: copy_rates_from_pos({symbol}, M15) returned nothing — {mt5.last_error()}")
+        return None
+    return datetime.fromtimestamp(rates[0]["time"], tz=timezone.utc)
+
+
+async def fetcher_loop(run_pipeline_fn, get_symbol_fn=None) -> None:
+    """
+    Background coroutine — checks every 30s for a new M15 bar.
+    On a new bar: fetch data → run pipeline → Claude → Telegram.
+
+    get_symbol_fn: optional callable () -> str that returns the active symbol.
+    When provided, the loop reads the symbol on every tick so Telegram
+    market-selection changes take effect without a restart.
+    """
+    from backend.scanner import update_symbol_data
+
+    cfg = settings.mt5_fetcher
+    check_sec: int = int(cfg.get("check_interval_sec", 30))
+    bars: int = int(cfg.get("bars_per_tf", 100))
+
+    def _active_symbol() -> str:
+        return get_symbol_fn() if get_symbol_fn else cfg.get("symbol", "XAUUSD")
+
+    initial_symbol = _active_symbol()
+    logger.info(f"MT5 fetcher starting — symbol={initial_symbol} check_every={check_sec}s")
+
+    connected = await asyncio.to_thread(connect)
+    if not connected:
+        logger.error(
+            "MT5 fetcher: could not connect. "
+            "Make sure MT5 terminal is open and logged in, then restart."
+        )
+        return
+
+    # Ensure initial symbol is in Market Watch
+    sym_ok = await asyncio.to_thread(_ensure_symbol, initial_symbol)
+    if not sym_ok:
+        logger.error(
+            f"MT5 fetcher: symbol '{initial_symbol}' not found. "
+            f"Check Market Watch — Exness cent accounts often use 'XAUUSDc' instead of 'XAUUSD'."
+        )
+        await asyncio.to_thread(disconnect)
+        return
+
+    last_bar: datetime | None = None
+    last_symbol: str = initial_symbol
+
+    try:
+        while True:
+            await asyncio.sleep(check_sec)
+
+            symbol = _active_symbol()
+
+            # Symbol changed via Telegram — re-validate and reset bar tracking
+            if symbol != last_symbol:
+                logger.info(f"MT5 fetcher: symbol switched {last_symbol!r} → {symbol!r}")
+                ok = await asyncio.to_thread(_ensure_symbol, symbol)
+                if not ok:
+                    logger.warning(
+                        f"MT5 fetcher: '{symbol}' not in Market Watch — reverting to {last_symbol!r}"
+                    )
+                    symbol = last_symbol
+                else:
+                    last_bar = None      # force immediate analysis on new symbol
+                    last_symbol = symbol
+
+            bar_time = await asyncio.to_thread(_current_m15_time, symbol)
+            if bar_time is None:
+                logger.warning(
+                    f"MT5 fetcher: cannot read M15 bar for {symbol} — "
+                    "market may be closed, or symbol dropped from Market Watch"
+                )
+                continue
+
+            if bar_time == last_bar:
+                continue  # same bar, nothing to do
+
+            last_bar = bar_time
+            logger.info(f"MT5 fetcher: new M15 bar {bar_time.strftime('%H:%M UTC')} — fetching {symbol}")
+
+            ohlcv = await asyncio.to_thread(fetch_ohlcv, symbol, bars)
+            if ohlcv is None:
+                continue
+
+            account = await asyncio.to_thread(fetch_account)
+
+            # Keep scanner cache current
+            await update_symbol_data(ohlcv)
+
+            # Run full analysis pipeline
+            try:
+                await run_pipeline_fn(ohlcv, account)
+            except Exception as exc:
+                logger.error(f"MT5 fetcher: pipeline error — {exc}")
+
+    except asyncio.CancelledError:
+        logger.info("MT5 fetcher: shutting down")
+    finally:
+        await asyncio.to_thread(disconnect)

@@ -1,0 +1,44 @@
+# Core API
+anthropic>=0.40.0
+
+# Web Server
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+
+# MT5 Bridge
+pyzmq>=26.2.0
+MetaTrader5>=5.0.45
+
+# Technical Indicators
+pandas>=2.2.0
+numpy>=2.1.0
+ta>=0.11.0
+
+# Configuration
+pyyaml>=6.0.2
+python-dotenv>=1.0.1
+pydantic>=2.10.0
+pydantic-settings>=2.7.0
+
+# Scheduling
+apscheduler>=3.10.4
+
+# HTTP Client (news filter, calendar fetch)
+httpx>=0.28.0
+
+# Database
+aiosqlite>=0.20.0
+
+# Caching
+redis>=5.2.0
+
+# Notifications
+python-telegram-bot>=21.9
+
+# Logging
+loguru>=0.7.3
+
+# Testing
+pytest>=8.3.0
+pytest-asyncio>=0.24.0
+pytest-httpx>=0.35.0

@@ -1,0 +1,103 @@
+# MT5 AI Analyst Bot — Configuration
+
+claude:
+  model: "claude-sonnet-4-6"
+  max_tokens: 1024
+  temperature: 0.2                  # low = more deterministic analysis
+  confidence_threshold: 70          # skip signals below this %
+  cache_system_prompt: true
+
+server:
+  host: "127.0.0.1"
+  port: 8000
+  zmq_pull_port: 5555               # receives data from MT5
+  zmq_pub_port: 5556                # sends signals back to MT5
+
+symbols:
+  watchlist:
+    - "BTCUSDc"       # Bitcoin  (crypto 24/7)
+    - "ETHUSDc"       # Ethereum (crypto 24/7)
+    - "XAUUSDc"       # Gold     (check your broker name)
+    - "EURUSDc"       # Euro/USD (forex)
+    - "GBPUSDc"       # GBP/USD  (forex)
+    - "USDJPYc"       # USD/JPY  (forex)
+  default_timeframes:
+    - "M15"
+    - "H1"
+    - "H4"
+    - "D1"
+  bars_per_timeframe: 100
+
+risk:
+  account_risk_percent: 1.0         # risk 1% of account per trade
+  min_lot_size: 0.1                 # minimum lot per trade (enforced server-side) — cent account
+  max_lot_size: 1.0                 # hard cap per trade (enforced server-side) — cent account
+  max_open_trades: 3
+  max_daily_loss_percent: 3.0       # pause bot if daily loss hits 3%
+  min_sl_atr_multiplier: 0.5
+  max_sl_atr_multiplier: 3.0
+  tp1_rr_ratio: 1.5                 # TP1 at 1.5R
+  tp2_rr_ratio: 2.5                 # TP2 at 2.5R
+  tp3_rr_ratio: 4.0                 # TP3 at 4.0R
+
+news_filter:
+  enabled: true
+  block_minutes_before: 30
+  block_minutes_after: 30
+  impact_levels:                    # block these impact levels
+    - "HIGH"
+  calendar_refresh_hours: 4
+
+mt5_fetcher:
+  enabled: true
+  use_agent: true                   # true = full agent mode, false = signal-only analyst
+  symbol: "BTCUSDc"
+  bars_per_tf: 100
+  check_interval_sec: 30            # how often to poll for a new M15 bar
+
+scanner:
+  enabled: false                    # disabled — mt5_fetcher handles data collection
+  interval_minutes: 15
+  top_signals_per_cycle: 1
+
+sessions:
+  sydney:
+    open: "21:00"
+    close: "06:00"
+  tokyo:
+    open: "00:00"
+    close: "09:00"
+  london:
+    open: "07:00"
+    close: "16:00"
+  new_york:
+    open: "12:00"
+    close: "21:00"
+  timezone: "UTC"
+
+indicators:
+  rsi_period: 14
+  macd_fast: 12
+  macd_slow: 26
+  macd_signal: 9
+  atr_period: 14
+  ema_periods:
+    - 20
+    - 50
+    - 200
+  sr_lookback_bars: 50              # bars to look back for swing S/R
+
+telegram:
+  enabled: true                    # set true after adding token in .env
+  send_signal_alerts: true
+  send_daily_summary: true
+  daily_summary_time: "00:00"       # UTC
+
+logging:
+  level: "INFO"
+  file: "logs/bot.log"
+  rotation: "10 MB"
+  retention: "30 days"
+
+database:
+  path: "data/signals.db"
