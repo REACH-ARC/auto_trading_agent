@@ -6,6 +6,10 @@ from __future__ import annotations
 
 import asyncio
 import sys
+
+# ZMQ requires SelectorEventLoop on Windows (Proactor is the default in Python 3.8+)
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any
