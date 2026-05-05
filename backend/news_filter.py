@@ -142,6 +142,13 @@ async def _fetch_url(client: httpx.AsyncClient, url: str) -> list[dict]:
         resp = await client.get(url, timeout=10.0)
         resp.raise_for_status()
         return resp.json()
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            # Next-week calendar returns 404 until ForexFactory publishes it (~Thursday)
+            logger.debug(f"Calendar not yet available (404): {url}")
+        else:
+            logger.warning(f"Failed to fetch calendar from {url}: {e}")
+        return []
     except Exception as e:
         logger.warning(f"Failed to fetch calendar from {url}: {e}")
         return []

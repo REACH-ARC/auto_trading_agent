@@ -31,9 +31,14 @@ from backend.signal_logger import (
     update_outcome,
 )
 from backend.mt5_bridge import parse_mt5_message, serialize_signal
+from backend.mt5_tools import get_symbol_info as _mt5_symbol_info, get_open_positions as _mt5_open_positions
 from backend.scanner import ScanResult, scheduled_scan, update_symbol_data
 from backend.mt5_fetcher import fetcher_loop
 from backend.claude_agent import run_agent
+from backend.strategy_engine import run_strategy
+from backend.trade_manager import trade_manager_loop
+from backend.backtester import BacktestConfig, run_backtest
+from backend import model_manager, account_manager
 from notifications.telegram_bot import notifier as telegram
 
 # ---------------------------------------------------------------------------
@@ -82,6 +87,7 @@ def _setup_logging() -> None:
 class _AppState:
     zmq_task: asyncio.Task | None = None
     mt5_fetcher_task: asyncio.Task | None = None
+    trade_manager_task: asyncio.Task | None = None
     started_at: datetime = datetime.now(timezone.utc)
     signals_processed: int = 0
     last_signal_at: datetime | None = None
@@ -89,10 +95,28 @@ class _AppState:
     scanner_cycles: int = 0
     last_scan_at: datetime | None = None
     last_scan_top_symbol: str | None = None
-    active_symbol: str = settings.mt5_fetcher.get("symbol", "XAUUSD")
+    active_symbol: str = account_manager.strip_suffix(settings.mt5_fetcher.get("symbol", "XAUUSD"))
 
 
 _state = _AppState()
+
+# Cache tick info per symbol so we don't fetch on every bar
+_tick_info_cache: dict[str, dict] = {}
+
+
+async def _fetch_tick_info(symbol: str) -> dict | None:
+    """Fetch symbol tick/lot info from MT5 (cached per symbol per session)."""
+    if not settings.risk.get("use_fixed_sl_amount", False):
+        return None
+    if symbol in _tick_info_cache:
+        return _tick_info_cache[symbol]
+    info = await asyncio.to_thread(_mt5_symbol_info, symbol)
+    if "error" in info:
+        logger.warning(f"tick_info fetch failed for {symbol}: {info['error']}")
+        return None
+    _tick_info_cache[symbol] = info
+    logger.debug(f"tick_info cached for {symbol}: tick_size={info['tick_size']} tick_value={info['tick_value']}")
+    return info
 
 
 # ---------------------------------------------------------------------------
@@ -102,6 +126,7 @@ _state = _AppState()
 async def run_pipeline(
     ohlcv: OHLCVData,
     account: AccountState,
+    level_hits=None,  # accepted but unused — level context is agent-only
 ) -> tuple[SignalResult, RiskDecision, int]:
     """
     Full analysis pipeline:
@@ -146,7 +171,23 @@ async def run_pipeline(
         signal_id = await log_signal(no_trade, risk)
         return no_trade, risk, signal_id
 
-    # Claude analysis
+    # Analysis — only call Claude when it is the active model.
+    # When Ollama is selected the full agent loop (run_agent) handles analysis;
+    # calling analyse() here would silently spend Claude credits.
+    if model_manager.get_active_model() != "claude":
+        logger.info(
+            f"run_pipeline: skipping Claude analyse() — active model="
+            f"{model_manager.get_active_model()} (use MT5 fetcher agent loop)"
+        )
+        no_trade = SignalResult(
+            symbol=symbol, direction="NO_TRADE", confidence=0,
+            reasoning=f"Pipeline analysis skipped — model={model_manager.get_active_model()} uses agent loop.",
+            invalidation="", confluence_factors=[],
+        )
+        risk = RiskDecision(approved=False, lot_size=0.0, risk_amount=0.0, sl_distance=0.0)
+        signal_id = await log_signal(no_trade, risk)
+        return no_trade, risk, signal_id
+
     try:
         signal = analyse(ohlcv, indicators)
     except Exception as e:
@@ -162,7 +203,8 @@ async def run_pipeline(
 
     # SRV-05  Risk manager — use H4 ATR for SL validation
     atr_h4 = indicators.atr.get("H4", indicators.atr.get(list(indicators.atr.keys())[-1], 0.0))
-    risk = evaluate(signal, account, atr_h4)
+    tick_info = await _fetch_tick_info(ohlcv.symbol)
+    risk = evaluate(signal, account, atr_h4, tick_info=tick_info)
 
     # Log to DB
     signal_id = await log_signal(signal, risk)
@@ -221,6 +263,15 @@ async def _zmq_listener() -> None:
             # Update scanner cache with fresh data for this symbol
             await update_symbol_data(ohlcv)
 
+            # Respect the active symbol — skip pipeline for symbols that don't match
+            active = account_manager.apply_suffix(_state.active_symbol)
+            if ohlcv.symbol != active:
+                logger.debug(
+                    f"ZMQ: skipping pipeline for {ohlcv.symbol} "
+                    f"(active symbol is {active})"
+                )
+                continue
+
             signal, risk, signal_id = await run_pipeline(ohlcv, account)
             response = serialize_signal(signal, risk, signal_id)
             await pub.send_string(response)
@@ -270,6 +321,116 @@ async def _run_scanner_cycle() -> None:
     await scheduled_scan(on_signal_fn=_on_scanner_signal)
 
 
+async def _run_strategy_cycle(ohlcv: OHLCVData, account: AccountState) -> None:
+    """
+    Execute one strategy bar cycle.
+    - If scan_all_symbols=true: scans every watchlist symbol and picks the best signal.
+    - If scan_all_symbols=false: runs only on the provided symbol.
+    - If auto_trade=true and risk approved: places the order via MT5.
+    """
+    from backend.indicators import compute_indicators
+    from backend.risk_manager import evaluate
+    from backend.mt5_fetcher import fetch_ohlcv, fetch_account
+
+    auto_trade: bool = model_manager.get_auto_trade()
+    scan_all:   bool = model_manager.get_scan_all_symbols()
+    bars: int        = int(settings.mt5_fetcher.get("bars_per_tf", 100))
+
+    candidates: list[tuple] = []   # (signal, risk, indicators)
+
+    async def _evaluate_symbol(sym: str) -> None:
+        # Skip if a position is already open on this symbol
+        existing = await asyncio.to_thread(_mt5_open_positions, sym)
+        if existing.get("positions"):
+            logger.debug(f"Strategy cycle: skipping {sym} — position already open")
+            return
+        ohlcv_s = await asyncio.to_thread(fetch_ohlcv, sym, bars)
+        if ohlcv_s is None:
+            return
+        ind_s = compute_indicators(ohlcv_s)
+        sig_s = run_strategy(ohlcv_s, ind_s)
+        if not sig_s.is_actionable:
+            return
+        acc_s = await asyncio.to_thread(fetch_account)
+        atr_h4 = ind_s.atr.get("H4", ind_s.atr.get(list(ind_s.atr.keys())[-1], 0.0))
+        tick_s = await _fetch_tick_info(sym)
+        risk_s = evaluate(sig_s, acc_s, atr_h4, tick_info=tick_s)
+        candidates.append((sig_s, risk_s, ind_s))
+
+    if scan_all:
+        watchlist = account_manager.get_watchlist()
+        logger.info(f"Strategy multi-symbol scan: {len(watchlist)} symbols")
+        await asyncio.gather(*[_evaluate_symbol(sym) for sym in watchlist])
+    else:
+        indicators = compute_indicators(ohlcv)
+        signal     = run_strategy(ohlcv, indicators)
+        if signal.is_actionable:
+            atr_h4 = indicators.atr.get("H4", indicators.atr.get(list(indicators.atr.keys())[-1], 0.0))
+            tick_info = await _fetch_tick_info(ohlcv.symbol)
+            risk   = evaluate(signal, account, atr_h4, tick_info=tick_info)
+            candidates.append((signal, risk, indicators))
+        else:
+            signal_id = await log_signal(signal, evaluate(signal, account, 0.0))
+            logger.info(
+                f"Strategy cycle: {ohlcv.symbol} NO_TRADE conf=0% id={signal_id}"
+            )
+            return
+
+    if not candidates:
+        logger.info("Strategy cycle: no actionable signals this bar")
+        return
+
+    # Pick highest-confidence approved signal; fall back to highest-confidence overall
+    approved  = [(s, r, i) for s, r, i in candidates if r.approved]
+    best_signal, best_risk, _ = max(
+        approved if approved else candidates,
+        key=lambda x: x[0].confidence,
+    )
+
+    signal_id = await log_signal(best_signal, best_risk)
+    logger.info(
+        f"Strategy cycle: {best_signal.symbol} {best_signal.direction} "
+        f"conf={best_signal.confidence}% approved={best_risk.approved} id={signal_id}"
+    )
+
+    await telegram.send_signal_alert(best_signal, best_risk)
+
+    # Place order when auto_trade is on and risk approved
+    if auto_trade and best_risk.approved:
+        from backend.mt5_tools import place_order
+        strategy_name = model_manager.get_active_strategy()
+        result = await asyncio.to_thread(
+            place_order,
+            best_signal.symbol,
+            best_signal.direction,
+            best_risk.lot_size,
+            best_signal.sl,
+            best_signal.tp1,
+            best_signal.tp2,
+            best_signal.tp3,
+            f"Strategy-{strategy_name}"[:31],
+        )
+        if "error" in result:
+            logger.error(f"Strategy order failed: {result['error']}")
+            await telegram.send_agent_update(
+                f"⚠️ <b>Strategy order failed</b>\n"
+                f"<code>{best_signal.symbol} {best_signal.direction}</code>\n"
+                f"Reason: {result['error']}"
+            )
+        else:
+            logger.info(
+                f"Strategy order placed ✅ ticket={result.get('ticket')} "
+                f"{best_signal.symbol} {best_signal.direction} lot={best_risk.lot_size}"
+            )
+            await telegram.send_agent_update(
+                f"✅ <b>Strategy order placed</b>\n"
+                f"<code>{best_signal.symbol} {best_signal.direction}</code>  "
+                f"lot={best_risk.lot_size}  ticket={result.get('ticket')}\n"
+                f"Entry={best_signal.entry:.5f}  SL={best_signal.sl:.5f}  "
+                f"TP1={best_signal.tp1:.5f}"
+            )
+
+
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
     _setup_logging()
@@ -277,10 +438,10 @@ async def _lifespan(app: FastAPI):
     _state.zmq_task = asyncio.create_task(_zmq_listener())
 
     def _get_active_symbol() -> str:
-        return _state.active_symbol
+        return account_manager.apply_suffix(_state.active_symbol)
 
     def _set_active_symbol(symbol: str) -> None:
-        _state.active_symbol = symbol
+        _state.active_symbol = account_manager.strip_suffix(symbol)
         logger.info(f"Active trading symbol changed to {symbol}")
 
     # Telegram bot
@@ -288,7 +449,15 @@ async def _lifespan(app: FastAPI):
         get_status_fn=health,
         get_symbol_fn=_get_active_symbol,
         set_symbol_fn=_set_active_symbol,
-        watchlist=settings.symbols.get("watchlist", []),
+        get_model_fn=model_manager.get_active_model,
+        set_model_fn=model_manager.set_active_model,
+        get_watchlist_fn=account_manager.get_watchlist,
+        get_strategy_fn=model_manager.get_active_strategy,
+        set_strategy_fn=model_manager.set_active_strategy,
+        get_auto_trade_fn=model_manager.get_auto_trade,
+        set_auto_trade_fn=model_manager.set_auto_trade,
+        get_scan_all_fn=model_manager.get_scan_all_symbols,
+        set_scan_all_fn=model_manager.set_scan_all_symbols,
     )
 
     # APScheduler — daily summary + multi-symbol scanner
@@ -322,19 +491,23 @@ async def _lifespan(app: FastAPI):
     _state.scheduler.start()
     logger.info(f"APScheduler started — daily summary at {summary_time} UTC")
 
-    # MT5 Direct Fetcher — drives the Claude agent loop
+    # MT5 Direct Fetcher — drives the agent / strategy loop
     if settings.mt5_fetcher.get("enabled", False):
         use_agent = settings.mt5_fetcher.get("use_agent", True)
         if use_agent:
-            async def _agent_cycle(ohlcv: OHLCVData, account: AccountState) -> None:
-                await run_agent(ohlcv.symbol, account, telegram_notifier=telegram)
+            async def _agent_cycle(ohlcv: OHLCVData, account: AccountState, level_hits=None) -> None:
+                active = model_manager.get_active_model()
+                if active == "strategy":
+                    await _run_strategy_cycle(ohlcv, account)
+                else:
+                    await run_agent(ohlcv.symbol, account, telegram_notifier=telegram, level_hits=level_hits)
                 _state.signals_processed += 1
                 _state.last_signal_at = datetime.now(timezone.utc)
 
             _state.mt5_fetcher_task = asyncio.create_task(
                 fetcher_loop(_agent_cycle, get_symbol_fn=_get_active_symbol)
             )
-            logger.info("MT5 fetcher started — Claude agent mode (full tool use)")
+            logger.info("MT5 fetcher started — agent/strategy mode")
         else:
             _state.mt5_fetcher_task = asyncio.create_task(
                 fetcher_loop(run_pipeline, get_symbol_fn=_get_active_symbol)
@@ -342,6 +515,9 @@ async def _lifespan(app: FastAPI):
             logger.info("MT5 fetcher started — analyst mode (signal-only)")
     else:
         logger.info("MT5 fetcher disabled in settings.yaml (mt5_fetcher.enabled=false)")
+
+    # Trade manager — manages SL for all open positions
+    _state.trade_manager_task = asyncio.create_task(trade_manager_loop())
 
     logger.info("MT5 Analyst Bot server started")
 
@@ -351,18 +527,17 @@ async def _lifespan(app: FastAPI):
     if _state.scheduler:
         _state.scheduler.shutdown(wait=False)
     await telegram.stop()
-    if _state.mt5_fetcher_task:
-        _state.mt5_fetcher_task.cancel()
-        try:
-            await _state.mt5_fetcher_task
-        except asyncio.CancelledError:
-            pass
-    if _state.zmq_task:
-        _state.zmq_task.cancel()
-        try:
-            await _state.zmq_task
-        except asyncio.CancelledError:
-            pass
+    for task in (
+        _state.trade_manager_task,
+        _state.mt5_fetcher_task,
+        _state.zmq_task,
+    ):
+        if task:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
     logger.info("Server shut down cleanly")
 
 
@@ -405,7 +580,7 @@ async def scanner_status() -> dict:
     from backend.scanner import _cache
     snapshot = await _cache.snapshot()
     cfg = settings.scanner
-    watchlist: list[str] = settings.symbols.get("watchlist", [])
+    watchlist: list[str] = account_manager.get_watchlist()
 
     symbol_data_ages = {}
     now = datetime.now(timezone.utc)
@@ -474,6 +649,90 @@ async def trigger_scanner() -> dict:
                 "scanned_at":       r.scanned_at.isoformat(),
             }
             for r in top
+        ],
+    }
+
+
+# ---------------------------------------------------------------------------
+# POST /backtest — walk-forward strategy backtest on MT5 historical data
+# ---------------------------------------------------------------------------
+
+class BacktestRequest(BaseModel):
+    symbol: str = ""                    # defaults to active symbol
+    strategy: str = "ema_pullback"      # ema_pullback | asian_breakout | sr_bounce
+    days: int = 90                      # how many days of history to test
+    initial_balance: float = 10_000.0
+    risk_pct: float = 1.0
+    max_trades: int = 0                 # 0 = unlimited; >0 stops after N closed trades
+
+
+@app.post("/backtest", tags=["signals"])
+async def backtest(req: BacktestRequest) -> dict:
+    """
+    Run a walk-forward backtest of a rule-based strategy on MT5 historical data.
+    MT5 terminal must be open and logged in.
+    """
+    symbol = req.symbol or _state.active_symbol
+    if not symbol:
+        raise HTTPException(status_code=422, detail="symbol is required")
+
+    if req.days < 7 or req.days > 365:
+        raise HTTPException(status_code=422, detail="days must be between 7 and 365")
+
+    cfg = BacktestConfig(
+        symbol=symbol,
+        strategy=req.strategy,
+        days=req.days,
+        initial_balance=req.initial_balance,
+        risk_pct=req.risk_pct,
+        max_trades=req.max_trades,
+    )
+
+    try:
+        result = await asyncio.to_thread(run_backtest, cfg)
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except Exception as e:
+        logger.error(f"Backtest error: {e}")
+        raise HTTPException(status_code=500, detail=f"Backtest failed: {e}")
+
+    return {
+        "symbol":            result.symbol,
+        "strategy":          result.strategy,
+        "period_start":      result.period_start.strftime("%Y-%m-%d"),
+        "period_end":        result.period_end.strftime("%Y-%m-%d"),
+        "total_trades":      result.total_trades,
+        "wins":              result.wins,
+        "losses":            result.losses,
+        "open_trades":       result.open_trades,
+        "win_rate_pct":      result.win_rate_pct,
+        "profit_factor":     result.profit_factor,
+        "max_drawdown_pct":  result.max_drawdown_pct,
+        "net_pnl_r":         result.net_pnl_r,
+        "net_pnl_usd":       result.net_pnl_usd,
+        "initial_balance":   result.initial_balance,
+        "final_balance":     result.final_balance,
+        "avg_bars_held":     result.avg_bars_held,
+        "avg_confidence":    result.avg_confidence,
+        "bars_tested":       result.bars_tested,
+        "no_trade_count":    result.no_trade_count,
+        "sample_no_trade_reasons": result.sample_no_trade_reasons,
+        "trades": [
+            {
+                "entry_time":  t.entry_time.strftime("%Y-%m-%d %H:%M"),
+                "close_time":  t.close_time.strftime("%Y-%m-%d %H:%M") if t.close_time else None,
+                "direction":   t.direction,
+                "entry":       t.entry,
+                "sl":          t.sl,
+                "tp1":         t.tp1,
+                "confidence":  t.confidence,
+                "outcome":     t.outcome,
+                "bars_held":   t.bars_held,
+                "pnl_r":       t.pnl_r,
+                "pnl_usd":     round(t.pnl_usd, 2),
+                "reasoning":   t.reasoning,
+            }
+            for t in result.trades
         ],
     }
 

@@ -7,6 +7,10 @@ claude:
   confidence_threshold: 70          # skip signals below this %
   cache_system_prompt: true
 
+ollama:
+  base_url: "http://localhost:11434/v1"
+  model: "gpt-oss:120b-cloud"    # model pulled in Ollama (free/local)
+
 server:
   host: "127.0.0.1"
   port: 8000
@@ -14,13 +18,15 @@ server:
   zmq_pub_port: 5556                # sends signals back to MT5
 
 symbols:
-  watchlist:
-    - "BTCUSDc"       # Bitcoin  (crypto 24/7)
-    - "ETHUSDc"       # Ethereum (crypto 24/7)
-    - "XAUUSDc"       # Gold     (check your broker name)
-    - "EURUSDc"       # Euro/USD (forex)
-    - "GBPUSDc"       # GBP/USD  (forex)
-    - "USDJPYc"       # USD/JPY  (forex)
+  cent_suffix: "c"          # Exness cent account symbol suffix
+  standard_suffix: "m"      # Exness standard account symbol suffix
+  watchlist_base:
+    - "BTCUSD"        # Bitcoin  (crypto 24/7)
+    - "ETHUSD"        # Ethereum (crypto 24/7)
+    - "XAUUSD"        # Gold
+    - "EURUSD"        # Euro/USD (forex)
+    - "GBPUSD"        # GBP/USD  (forex)
+    - "USDJPY"        # USD/JPY  (forex)
   default_timeframes:
     - "M15"
     - "H1"
@@ -29,10 +35,21 @@ symbols:
   bars_per_timeframe: 100
 
 risk:
-  account_risk_percent: 1.0         # risk 1% of account per trade
-  min_lot_size: 0.1                 # minimum lot per trade (enforced server-side) — cent account
-  max_lot_size: 1.0                 # hard cap per trade (enforced server-side) — cent account
+  # Lot sizing mode — choose one:
+  #   use_fixed_sl_amount: true  → lot size calculated so SL = exact dollar amount
+  #   use_fixed_sl_amount: false → lot size calculated as % of equity (account_risk_percent)
+  use_fixed_sl_amount: true
+  sl_amount_usd: 50.0               # max loss per trade for USD standard accounts ($50)
+  sl_amount_usc: 1000.0             # max loss per trade for USC cent accounts (1000 USC ≈ $10)
+  account_risk_percent: 1.0         # only used when use_fixed_sl_amount: false
   max_open_trades: 3
+  # Per-account-type lot limits — auto-detected from MT5 account currency
+  cent:                             # USC cent account (100 USC = 1 USD)
+    min_lot_size: 0.10
+    max_lot_size: 1.0
+  standard:                         # USD standard account
+    min_lot_size: 0.01
+    max_lot_size: 0.30
   max_daily_loss_percent: 3.0       # pause bot if daily loss hits 3%
   min_sl_atr_multiplier: 0.5
   max_sl_atr_multiplier: 3.0
@@ -51,7 +68,7 @@ news_filter:
 mt5_fetcher:
   enabled: true
   use_agent: true                   # true = full agent mode, false = signal-only analyst
-  symbol: "BTCUSDc"
+  symbol: "XAUUSD"                   # base symbol — suffix added automatically at runtime
   bars_per_tf: 100
   check_interval_sec: 30            # how often to poll for a new M15 bar
 
@@ -92,6 +109,37 @@ telegram:
   send_signal_alerts: true
   send_daily_summary: true
   daily_summary_time: "00:00"       # UTC
+
+trade_manager:
+  enabled: true
+  check_interval_sec: 10           # how often to check open positions
+  breakeven_at_r: 1.0              # move SL to entry when position profits N×R
+  trail_tp1_at_r: 2.5              # move SL to TP1 when position profits N×R (past TP2)
+
+strategy:
+  active: "ema_pullback"           # ema_pullback | asian_breakout | sr_bounce
+  auto_trade: true                 # true = place orders automatically; false = alert only
+  scan_all_symbols: false          # true = scan full watchlist per bar, pick best signal
+  ema_pullback:
+    trend_tf: "H4"                 # timeframe for trend bias (EMA200)
+    entry_tf: "H1"                 # timeframe for pullback entry (EMA20)
+    rsi_min: 40                    # RSI must be above this for BUY entry
+    rsi_max: 60                    # RSI must be below this for SELL entry
+    sl_atr_buffer: 1.5             # SL = EMA20 ± (sl_atr_buffer × ATR)
+    ema_proximity_atr: 0.8         # price must be within N×ATR of EMA20
+    min_confidence: 65             # skip signals below this
+  asian_breakout:
+    session_start_utc: "00:00"
+    session_end_utc: "07:00"
+    max_range_atr_mult: 2.0        # ignore if range > N×ATR (widened from 1.5 for more setups)
+    breakout_buffer_atr: 0.1       # price must exceed range edge by N×ATR to confirm break
+    min_confidence: 65
+  sr_bounce:
+    proximity_atr: 0.5             # price must be within N×ATR of S/R level
+    rsi_oversold: 30               # RSI threshold for bounce buy (tightened from 35)
+    rsi_overbought: 70             # RSI threshold for bounce sell (tightened from 65)
+    min_strength: 2                # minimum S/R touch count
+    min_confidence: 65
 
 logging:
   level: "INFO"

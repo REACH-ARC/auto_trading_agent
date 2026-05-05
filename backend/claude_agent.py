@@ -20,12 +20,13 @@ from loguru import logger
 from config import settings
 from backend.risk_manager import AccountState
 import backend.mt5_tools as tools
+import backend.model_manager as model_manager
 
 # ---------------------------------------------------------------------------
 # System prompt
 # ---------------------------------------------------------------------------
 
-_SYSTEM_PROMPT = """\
+_SYSTEM_PROMPT_TEMPLATE = """\
 You are an autonomous trading agent with live access to MetaTrader 5.
 You have tools to read market data, manage open positions, and execute trades.
 You are triggered every time a new M15 bar closes.
@@ -64,23 +65,7 @@ Analyse using this framework:
        +20 additional strong factors (divergence, clean break, engulfing candle, etc.)
 
 ### Step 4 — Trade decision
-NOTE: This is a **cent account** (USC). 100 USC = 1 USD. Account balance displayed in USC.
-
-- If confidence >= 65 AND no open position in the same direction for this symbol:
-  a. Call get_symbol_info(symbol) to confirm tick value and lot constraints
-  b. Calculate lot_size using 1% risk rule:
-       risk_usc = balance × 0.01
-       lot_size = risk_usc / (SL_distance_in_price × tick_value / tick_size)
-     Then scale by confidence:
-       - confidence 65–74 → use 0.1 lots (minimum, cautious)
-       - confidence 75–84 → use 0.3–0.5 lots (moderate)
-       - confidence 85–94 → use 0.5–0.8 lots (confident)
-       - confidence 95–100 → use 0.8–1.0 lots (high conviction)
-     Always clamp: minimum 0.1, maximum 1.0. Round to broker lot_step.
-  c. Set SL at the nearest structural invalidation level (swing high/low)
-  d. Set TP1 = entry ± (SL_distance × 1.5) — this is the only TP; MT5 closes the full position here automatically
-  e. Call place_order() with order_type="MARKET" only — always enter at current price
-- If confidence < 65: NO_TRADE. Note what is missing.
+<<STEP4>>
 
 ### Step 5 — Telegram update (ALWAYS — even for no-trade)
 Call send_update() with a summary covering:
@@ -101,6 +86,49 @@ Call send_update() with a summary covering:
 - SL must always be structure-based, never a fixed pip value
 - If a tool returns an error, log it and adapt — do not retry blindly
 """
+
+_STEP4_CENT = """\
+NOTE: This is a **cent account** (USC). 100 USC = 1 USD. Account balance displayed in USC.
+
+- If confidence >= 65 AND no open position in the same direction for this symbol:
+  a. Call get_symbol_info(symbol) to confirm tick value and lot constraints
+  b. Calculate lot_size using 1% risk rule:
+       risk_usc = balance × 0.01
+       lot_size = risk_usc / (SL_distance_in_price × tick_value / tick_size)
+     Then scale by confidence:
+       - confidence 65–74 → use 0.1 lots (minimum, cautious)
+       - confidence 75–84 → use 0.3–0.5 lots (moderate)
+       - confidence 85–94 → use 0.5–0.8 lots (confident)
+       - confidence 95–100 → use 0.8–1.0 lots (high conviction)
+     Always clamp: minimum 0.1, maximum 1.0. Round to broker lot_step.
+  c. Set SL at the nearest structural invalidation level (swing high/low)
+  d. Set TP1 = entry ± (SL_distance × 1.5) — this is the only TP; MT5 closes the full position here automatically
+  e. Call place_order() with order_type="MARKET" only — always enter at current price
+- If confidence < 65: NO_TRADE. Note what is missing."""
+
+_STEP4_STANDARD = """\
+NOTE: This is a **standard account** (USD). Account balance is in real USD.
+
+- If confidence >= 65 AND no open position in the same direction for this symbol:
+  a. Call get_symbol_info(symbol) to confirm tick value and lot constraints
+  b. Calculate lot_size using 1% risk rule:
+       risk_usd = balance × 0.01
+       lot_size = risk_usd / (SL_distance_in_price × tick_value / tick_size)
+     Then scale by confidence:
+       - confidence 65–74 → use 50% of calculated lots (cautious)
+       - confidence 75–84 → use 75% of calculated lots (moderate)
+       - confidence 85–94 → use 100% of calculated lots (full risk)
+       - confidence 95–100 → use 100%, may add up to 25% extra on very high conviction
+     Clamp to broker min/max lot from get_symbol_info(). Round to broker lot_step.
+  c. Set SL at the nearest structural invalidation level (swing high/low)
+  d. Set TP1 = entry ± (SL_distance × 1.5) — this is the only TP; MT5 closes the full position here automatically
+  e. Call place_order() with order_type="MARKET" only — always enter at current price
+- If confidence < 65: NO_TRADE. Note what is missing."""
+
+
+def _make_system_prompt(is_cent: bool) -> str:
+    step4 = _STEP4_CENT if is_cent else _STEP4_STANDARD
+    return _SYSTEM_PROMPT_TEMPLATE.replace("<<STEP4>>", step4)
 
 # ---------------------------------------------------------------------------
 # Tool schemas
@@ -288,6 +316,25 @@ def _get_client() -> anthropic.Anthropic:
 
 
 # ---------------------------------------------------------------------------
+# OpenAI-compat client for Ollama
+# ---------------------------------------------------------------------------
+
+def _openai_tools() -> list[dict]:
+    """Convert Anthropic tool schemas to OpenAI function-call format."""
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": t["name"],
+                "description": t["description"],
+                "parameters": t["input_schema"],
+            },
+        }
+        for t in _TOOLS
+    ]
+
+
+# ---------------------------------------------------------------------------
 # Tool dispatcher
 # ---------------------------------------------------------------------------
 
@@ -332,30 +379,156 @@ async def _execute_tool(
 
 
 # ---------------------------------------------------------------------------
-# Main agent entry point
+# Ollama agent loop (OpenAI-compat API at localhost:11434)
 # ---------------------------------------------------------------------------
 
-async def run_agent(
+async def _run_agent_ollama(
     symbol: str,
     account: AccountState,
     telegram_notifier=None,
     max_iterations: int = 15,
+    level_hits=None,
+    initial_prompt: str = "",
 ) -> AgentResult:
-    """
-    Run one full agent cycle triggered by a new M15 bar.
-    Claude will call tools to analyse, manage positions, and trade autonomously.
-    """
-    result = AgentResult(symbol=symbol)
-    client = _get_client()
+    try:
+        from openai import AsyncOpenAI
+    except ImportError:
+        raise RuntimeError("openai package required for Ollama — run: pip install openai>=1.0.0")
 
-    initial_prompt = (
-        f"New M15 bar closed — <b>{symbol}</b>\n"
-        f"Time: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}\n\n"
+    result = AgentResult(symbol=symbol)
+    ollama_cfg = settings.ollama
+    base_url: str = ollama_cfg.get("base_url", "http://localhost:11434/v1")
+    model_name: str = ollama_cfg.get("model", "gemini-3-flash-preview:latest")
+
+    client = AsyncOpenAI(base_url=base_url, api_key="ollama")
+    ot = _openai_tools()
+    system_prompt = _make_system_prompt(account.is_cent)
+
+    messages: list[dict] = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": initial_prompt},
+    ]
+
+    try:
+        for iteration in range(max_iterations):
+            response = await client.chat.completions.create(
+                model=model_name,
+                messages=messages,
+                tools=ot,
+                tool_choice="auto",
+            )
+
+            choice = response.choices[0]
+            finish = choice.finish_reason
+
+            # Accumulate token usage
+            if response.usage:
+                result.input_tokens += response.usage.prompt_tokens or 0
+                result.output_tokens += response.usage.completion_tokens or 0
+
+            # Build assistant message for history
+            assistant_msg: dict = {"role": "assistant", "content": choice.message.content or ""}
+            if choice.message.tool_calls:
+                assistant_msg["tool_calls"] = [
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {"name": tc.function.name, "arguments": tc.function.arguments},
+                    }
+                    for tc in choice.message.tool_calls
+                ]
+            messages.append(assistant_msg)
+
+            if finish == "stop" or not choice.message.tool_calls:
+                logger.info(f"Ollama agent finished in {iteration + 1} iteration(s) for {symbol}")
+                break
+
+            # Execute tool calls
+            for tc in choice.message.tool_calls:
+                tool_input = json.loads(tc.function.arguments or "{}")
+                logger.info(f"Ollama agent → {tc.function.name}({json.dumps(tool_input)[:150]})")
+                tool_result = await _execute_tool(tc.function.name, tool_input, telegram_notifier)
+                logger.info(f"Ollama agent ← {tc.function.name}: {json.dumps(tool_result)[:250]}")
+
+                result.tool_calls.append(ToolCall(name=tc.function.name, input=tool_input, result=tool_result))
+
+                if tc.function.name == "place_order" and tool_result.get("success"):
+                    result.trade_placed = True
+                    result.trade_ticket = tool_result.get("ticket")
+                elif tc.function.name in ("modify_position", "close_position") and tool_result.get("success"):
+                    result.positions_managed += 1
+
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": json.dumps(tool_result),
+                })
+        else:
+            logger.warning(f"Ollama agent hit max_iterations ({max_iterations}) for {symbol}")
+
+    except Exception as e:
+        logger.error(f"Ollama agent loop error for {symbol}: {e}")
+        result.error = str(e)
+
+    logger.info(
+        f"Ollama cycle done — {symbol} | "
+        f"trade={result.trade_placed} ticket={result.trade_ticket} "
+        f"managed={result.positions_managed} | "
+        f"tokens in={result.input_tokens} out={result.output_tokens}"
+    )
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Main agent entry point
+# ---------------------------------------------------------------------------
+
+def _build_initial_prompt(
+    symbol: str,
+    account: AccountState,
+    level_hits=None,
+) -> str:
+    """Build the shared trigger prompt for both Claude and Ollama backends."""
+    level_context = ""
+    if level_hits:
+        lines = []
+        for hit in level_hits:
+            side = "above" if hit.touch_price >= hit.level_price else "below"
+            lines.append(
+                f"  • {hit.level_type.upper()} {hit.level_price:.5f} "
+                f"(strength={hit.strength}) — touched at {hit.hit_at.strftime('%H:%M UTC')}, "
+                f"candle closed {side} this level"
+            )
+        level_context = (
+            "\n\n⚡ LEVEL ALERT — price tested the following S/R zone(s) during this candle:\n"
+            + "\n".join(lines)
+            + "\nFactor this into your confidence scoring. A clean candle close beyond a "
+            "key level is a high-quality confirmation signal."
+        )
+
+    return (
+        f"New M15 bar closed — {symbol}\n"
+        f"Time: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}"
+        f"{level_context}\n\n"
         f"Current account snapshot (cached — fetch fresh via get_account_info):\n"
         f"  Equity={account.equity:.2f}  Balance={account.balance:.2f}  "
         f"Open trades={account.open_trades}  Daily P&L={account.daily_pnl:+.2f}\n\n"
         f"Run your full decision loop now."
     )
+
+
+async def _run_agent_claude(
+    symbol: str,
+    account: AccountState,
+    telegram_notifier=None,
+    max_iterations: int = 15,
+    level_hits=None,
+) -> AgentResult:
+    """Claude (Anthropic) backend — uses tool_use blocks and prompt caching."""
+    result = AgentResult(symbol=symbol)
+    client = _get_client()
+    initial_prompt = _build_initial_prompt(symbol, account, level_hits)
+    system_prompt = _make_system_prompt(account.is_cent)
 
     messages: list[dict] = [{"role": "user", "content": initial_prompt}]
     total_input = total_output = total_cache_read = total_cache_write = 0
@@ -369,7 +542,7 @@ async def run_agent(
                 system=[
                     {
                         "type": "text",
-                        "text": _SYSTEM_PROMPT,
+                        "text": system_prompt,
                         "cache_control": {"type": "ephemeral"},
                     }
                 ],
@@ -393,7 +566,6 @@ async def run_agent(
                 logger.warning(f"Agent unexpected stop_reason={response.stop_reason}")
                 break
 
-            # Execute all tool calls in this response turn
             tool_results = []
             for block in response.content:
                 if block.type != "tool_use":
@@ -432,10 +604,45 @@ async def run_agent(
     result.cache_write_tokens = total_cache_write
 
     logger.info(
-        f"Agent cycle done — {symbol} | "
+        f"Claude cycle done — {symbol} | "
         f"trade={result.trade_placed} ticket={result.trade_ticket} "
         f"managed={result.positions_managed} | "
         f"tokens in={total_input} out={total_output} "
         f"cache_read={total_cache_read} cost=${result.estimated_cost_usd:.5f}"
     )
     return result
+
+
+async def run_agent(
+    symbol: str,
+    account: AccountState,
+    telegram_notifier=None,
+    max_iterations: int = 15,
+    level_hits=None,
+) -> AgentResult:
+    """
+    Run one full agent cycle triggered by a new M15 bar.
+    Dispatches to Claude or Ollama backend based on the active model selection.
+    Switch models at runtime via Telegram /model command.
+    """
+    active = model_manager.get_active_model()
+    logger.info(f"run_agent — {symbol} using model={active}")
+
+    if active == "ollama":
+        initial_prompt = _build_initial_prompt(symbol, account, level_hits)
+        return await _run_agent_ollama(
+            symbol=symbol,
+            account=account,
+            telegram_notifier=telegram_notifier,
+            max_iterations=max_iterations,
+            level_hits=level_hits,
+            initial_prompt=initial_prompt,
+        )
+
+    return await _run_agent_claude(
+        symbol=symbol,
+        account=account,
+        telegram_notifier=telegram_notifier,
+        max_iterations=max_iterations,
+        level_hits=level_hits,
+    )

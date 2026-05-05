@@ -146,6 +146,71 @@
 
 ---
 
+---
+
+## Phase 13 — Strategy Mode (No AI)
+
+Add a **"Use Strategy (No AI)"** option to `/model` so the bot can trade using
+rule-based strategies without spending Claude or Ollama tokens.
+All strategies reuse existing indicators, risk manager, and Telegram alerts.
+
+### Phase A — Foundation
+
+- [x] **STR-01** Add `"strategy"` to `model_manager.AVAILABLE_MODELS`; add `active_strategy` getter/setter (default `"ema_pullback"`)
+- [x] **STR-02** Create `backend/strategies/__init__.py` — base `Strategy` protocol / interface
+- [x] **STR-03** Create `backend/strategy_engine.py` — dispatcher: reads `active_strategy`, calls the right strategy, returns `SignalResult`
+- [x] **STR-04** Wire `strategy_engine` into `main.py` fetcher cycle (alongside `run_agent` for claude/ollama)
+- [x] **STR-05** Add `strategy:` section to `settings.yaml` (active strategy name + per-strategy params)
+
+### Phase B — EMA Pullback Strategy (first implementation)
+
+**Logic:**
+- H4 trend bias from EMA200 (above = BUY bias, below = SELL bias)
+- Entry signal on M15/H1 pullback to EMA20
+- RSI confirmation: not overbought (>70) on BUY, not oversold (<30) on SELL
+- SL: below EMA20 minus 0.5× ATR (BUY) / above EMA20 plus 0.5× ATR (SELL)
+- TP1/2/3: from config `risk.tp1_rr_ratio` / `tp2_rr_ratio` / `tp3_rr_ratio`
+
+- [x] **STR-06** Create `backend/strategies/ema_pullback.py` implementing the logic above
+- [x] **STR-07** Return full `SignalResult` (entry, sl, tp1/2/3, confidence, reasoning, confluence_factors)
+
+### Phase C — Telegram Integration
+
+- [x] **STR-08** Add `"strategy"` entry to `/model` inline keyboard (shown as `📐 Strategy (No AI)`)
+- [x] **STR-09** Add `/strategy` command — inline keyboard to pick active strategy (only relevant when model=strategy)
+- [x] **STR-10** Show active strategy name in `/status` output when model=strategy
+
+### Phase D — Additional Strategies
+
+- [x] **STR-11** Create `backend/strategies/asian_breakout.py`
+  - Mark Asian session (00:00–07:00 UTC) high/low
+  - Enter breakout at London open (07:00 UTC) if range < 1.5× ATR
+- [x] **STR-12** Create `backend/strategies/sr_bounce.py`
+  - Use existing `indicators.support_resistance` levels
+  - Entry: price touches S/R + RSI reversal confirmation
+
+---
+
+## Phase 14 — Trade Manager & Multi-Symbol Strategy Scan
+
+### Trade Manager (auto trailing stop / breakeven)
+
+- [x] **TM-01** Create `backend/trade_manager.py` — background loop, tracks open positions
+- [x] **TM-02** Rule: r_moved ≥ `breakeven_at_r` → SL to entry (no-loss guarantee)
+- [x] **TM-03** Rule: r_moved ≥ `trail_tp1_at_r` → SL to TP1 (lock 1.5R profit)
+- [x] **TM-04** Add `trade_manager:` section to `settings.yaml` (enabled, intervals, thresholds)
+- [x] **TM-05** Wire trade manager loop into `main.py` lifespan (start/stop alongside fetcher)
+
+### Multi-Symbol Strategy Scan + Order Execution
+
+- [x] **MS-01** Fix strategy cycle to actually **place orders** when signal approved (was only alerting)
+- [x] **MS-02** Add `scan_all_symbols` flag to strategy settings (default `false`)
+- [x] **MS-03** When enabled: scan all watchlist symbols per M15 bar, pick highest-confidence signal
+- [x] **MS-04** Skip symbols that already have an open position
+- [x] **MS-05** Add `auto_trade` flag to strategy settings (default `true`)
+
+---
+
 ## Task Count Summary
 
 | Phase | Tasks | Status |
@@ -162,4 +227,7 @@
 | Multi-Symbol Scanner | 6 | 6 / 6 ✅ |
 | Testing | 6 | 6 / 6 ✅ |
 | Deployment | 5 | 5 / 5 ✅ |
-| **TOTAL** | **79** | **79 / 79** ✅ |
+| Strategy Mode | 12 | 12 / 12 ✅ |
+| Trade Manager + Multi-Symbol | 10 | 10 / 10 ✅ |
+| Backtesting | 3 | 3 / 3 ✅ |
+| **TOTAL** | **104** | **104 / 104** ✅ |

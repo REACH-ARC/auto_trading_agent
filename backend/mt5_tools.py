@@ -176,13 +176,28 @@ def place_order(
         mt5 = _mt5()
         risk_cfg = settings.risk
 
-        # Guard: lot size range
-        min_lot = float(risk_cfg.get("min_lot_size", 0.1))
-        max_lot = float(risk_cfg.get("max_lot_size", 1.0))
+        # Guard: lot size range — read limits for the detected account type
+        acct_info = mt5.account_info()
+        _currency = str(acct_info.currency) if acct_info else "USD"
+        _acct_type = "cent" if _currency.upper() == "USC" else "standard"
+        _type_cfg = risk_cfg.get(_acct_type, {})
+        min_lot = float(_type_cfg.get("min_lot_size", 0.01))
+        max_lot = float(_type_cfg.get("max_lot_size", 1.0))
         if lot_size < min_lot:
             lot_size = min_lot  # silently raise to minimum rather than rejecting
         if lot_size > max_lot:
-            return {"error": f"Lot {lot_size} exceeds max_lot_size={max_lot}. Reduce lot size."}
+            return {"error": f"Lot {lot_size} exceeds max_lot_size={max_lot} for {_acct_type} account. Reduce lot size."}
+
+        # Guard: no duplicate position on the same symbol
+        existing = mt5.positions_get(symbol=symbol) or []
+        if existing:
+            return {
+                "error": (
+                    f"Position already open on {symbol} "
+                    f"(ticket={existing[0].ticket}, {('BUY' if existing[0].type == 0 else 'SELL')}). "
+                    f"Only one position per symbol allowed."
+                )
+            }
 
         # Guard: max open trades
         open_positions = mt5.positions_get() or []
@@ -243,6 +258,10 @@ def place_order(
         else:
             return {"error": f"Unknown order_type: {order_type}"}
 
+        # Use the furthest TP as the hard MT5 close; intermediate levels are
+        # managed by the trade manager (SL stepped to TP1 then TP2 as each is hit).
+        hard_tp = tp3 or tp2 or tp1
+
         request = {
             "action": mt5_action,
             "symbol": symbol,
@@ -250,7 +269,7 @@ def place_order(
             "type": mt5_type,
             "price": price,
             "sl": sl,
-            "tp": tp1,
+            "tp": hard_tp,
             "comment": comment[:31],
             "type_time": mt5.ORDER_TIME_GTC,
             "type_filling": mt5.ORDER_FILLING_IOC,

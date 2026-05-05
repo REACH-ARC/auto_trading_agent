@@ -5,7 +5,7 @@ detects each new M15 bar, fetches OHLCV + account state, and runs the pipeline.
 
 Requirements:
   - MT5 terminal open on the same Windows PC (minimized is fine)
-  - Logged into your Exness cent account
+  - Logged into your MT5 account (cent or standard)
   - pip install MetaTrader5
 """
 from __future__ import annotations
@@ -50,9 +50,13 @@ def connect() -> bool:
         mt5.shutdown()
         return False
 
+    from backend import account_manager
+    account_manager.set_currency(str(info.currency))
+
     logger.info(
         f"MT5 connected — account #{info.login} | {info.server} | "
-        f"balance={info.balance:.2f} {info.currency}"
+        f"balance={info.balance:.2f} {info.currency} "
+        f"({'cent' if account_manager.is_cent() else 'standard'})"
     )
     return True
 
@@ -100,7 +104,7 @@ def fetch_ohlcv(symbol: str, bars: int = 100) -> OHLCVData | None:
 
 
 def fetch_account() -> AccountState:
-    """Return live account state from MT5."""
+    """Return live account state from MT5, including account currency."""
     try:
         import MetaTrader5 as mt5
         info = mt5.account_info()
@@ -111,6 +115,7 @@ def fetch_account() -> AccountState:
             balance=float(info.balance),
             open_trades=int(mt5.positions_total() or 0),
             daily_pnl=float(info.equity) - float(info.balance),
+            currency=str(info.currency),
         )
     except ImportError:
         return AccountState(equity=10_000, balance=10_000, open_trades=0, daily_pnl=0)
@@ -135,26 +140,42 @@ def _current_m15_time(symbol: str) -> datetime | None:
     return datetime.fromtimestamp(rates[0]["time"], tz=timezone.utc)
 
 
+def _current_price(symbol: str) -> float | None:
+    """Return current mid price (bid+ask)/2 for the symbol."""
+    import MetaTrader5 as mt5
+    tick = mt5.symbol_info_tick(symbol)
+    if tick is None:
+        return None
+    return (tick.bid + tick.ask) / 2.0
+
+
 async def fetcher_loop(run_pipeline_fn, get_symbol_fn=None) -> None:
     """
     Background coroutine — checks every 30s for a new M15 bar.
     On a new bar: fetch data → run pipeline → Claude → Telegram.
+
+    Between bar closes the loop monitors price against S/R levels (Option 3).
+    Any level touches during a candle are passed to the agent at bar close so
+    Claude can factor in confirmation context without reacting to mid-candle wicks.
 
     get_symbol_fn: optional callable () -> str that returns the active symbol.
     When provided, the loop reads the symbol on every tick so Telegram
     market-selection changes take effect without a restart.
     """
     from backend.scanner import update_symbol_data
+    from backend.level_watcher import LevelWatcher
+
+    from backend import account_manager
 
     cfg = settings.mt5_fetcher
     check_sec: int = int(cfg.get("check_interval_sec", 30))
     bars: int = int(cfg.get("bars_per_tf", 100))
 
     def _active_symbol() -> str:
-        return get_symbol_fn() if get_symbol_fn else cfg.get("symbol", "XAUUSD")
+        base = get_symbol_fn() if get_symbol_fn else cfg.get("symbol", "XAUUSD")
+        return account_manager.apply_suffix(account_manager.strip_suffix(base))
 
-    initial_symbol = _active_symbol()
-    logger.info(f"MT5 fetcher starting — symbol={initial_symbol} check_every={check_sec}s")
+    logger.info(f"MT5 fetcher starting — check_every={check_sec}s")
 
     connected = await asyncio.to_thread(connect)
     if not connected:
@@ -164,18 +185,24 @@ async def fetcher_loop(run_pipeline_fn, get_symbol_fn=None) -> None:
         )
         return
 
+    # account_manager.set_currency() was called inside connect() — suffix is now correct
+    initial_symbol = _active_symbol()
+    logger.info(f"MT5 fetcher: resolved symbol={initial_symbol} (account={account_manager.get_currency()})")
+
     # Ensure initial symbol is in Market Watch
     sym_ok = await asyncio.to_thread(_ensure_symbol, initial_symbol)
     if not sym_ok:
         logger.error(
-            f"MT5 fetcher: symbol '{initial_symbol}' not found. "
-            f"Check Market Watch — Exness cent accounts often use 'XAUUSDc' instead of 'XAUUSD'."
+            f"MT5 fetcher: symbol '{initial_symbol}' not found in Market Watch. "
+            f"Account type: {account_manager.get_currency()} — "
+            f"check that the symbol exists on your broker."
         )
         await asyncio.to_thread(disconnect)
         return
 
     last_bar: datetime | None = None
     last_symbol: str = initial_symbol
+    watcher = LevelWatcher()
 
     try:
         while True:
@@ -193,8 +220,14 @@ async def fetcher_loop(run_pipeline_fn, get_symbol_fn=None) -> None:
                     )
                     symbol = last_symbol
                 else:
-                    last_bar = None      # force immediate analysis on new symbol
+                    last_bar = None
+                    watcher.clear_symbol(last_symbol)
                     last_symbol = symbol
+
+            # Check current price against watched levels every tick
+            price = await asyncio.to_thread(_current_price, symbol)
+            if price is not None:
+                watcher.check_price(symbol, price)
 
             bar_time = await asyncio.to_thread(_current_m15_time, symbol)
             if bar_time is None:
@@ -205,7 +238,15 @@ async def fetcher_loop(run_pipeline_fn, get_symbol_fn=None) -> None:
                 continue
 
             if bar_time == last_bar:
-                continue  # same bar, nothing to do
+                continue  # same bar — level monitoring continues above
+
+            # New M15 bar: collect all level hits from the candle that just closed
+            level_hits = watcher.pop_hits(symbol)
+            if level_hits:
+                logger.info(
+                    f"MT5 fetcher: {len(level_hits)} level hit(s) from closed candle — "
+                    f"{[f'{h.level_type} {h.level_price}' for h in level_hits]}"
+                )
 
             last_bar = bar_time
             logger.info(f"MT5 fetcher: new M15 bar {bar_time.strftime('%H:%M UTC')} — fetching {symbol}")
@@ -214,14 +255,22 @@ async def fetcher_loop(run_pipeline_fn, get_symbol_fn=None) -> None:
             if ohlcv is None:
                 continue
 
+            # Update watcher with fresh S/R levels from the new bar's data
+            try:
+                from backend.indicators import compute_indicators
+                indicators = compute_indicators(ohlcv)
+                watcher.update_levels(symbol, indicators.support_resistance)
+            except Exception as exc:
+                logger.warning(f"MT5 fetcher: level update failed for {symbol} — {exc}")
+
             account = await asyncio.to_thread(fetch_account)
 
             # Keep scanner cache current
             await update_symbol_data(ohlcv)
 
-            # Run full analysis pipeline
+            # Run full analysis pipeline, passing level hit context for the agent
             try:
-                await run_pipeline_fn(ohlcv, account)
+                await run_pipeline_fn(ohlcv, account, level_hits=level_hits)
             except Exception as exc:
                 logger.error(f"MT5 fetcher: pipeline error — {exc}")
 

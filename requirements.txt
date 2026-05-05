@@ -1,5 +1,6 @@
 # Core API
 anthropic>=0.40.0
+openai>=1.0.0                    # Ollama OpenAI-compat API client
 
 # Web Server
 fastapi>=0.115.0
@@ -28,9 +29,6 @@ httpx>=0.28.0
 
 # Database
 aiosqlite>=0.20.0
-
-# Caching
-redis>=5.2.0
 
 # Notifications
 python-telegram-bot>=21.9

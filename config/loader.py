@@ -1,3 +1,7 @@
+
+
+
+
 from pathlib import Path
 from functools import lru_cache
 
@@ -22,6 +26,7 @@ class Settings(BaseSettings):
     anthropic_api_key: str = Field(..., alias="ANTHROPIC_API_KEY")
     telegram_bot_token: str = Field("", alias="TELEGRAM_BOT_TOKEN")
     telegram_chat_id: str = Field("", alias="TELEGRAM_CHAT_ID")
+    telegram_signal_channel_id: str = Field("", alias="TELEGRAM_SIGNAL_CHANNEL_ID")
     redis_url: str = Field("redis://127.0.0.1:6379/0", alias="REDIS_URL")
     app_env: str = Field("development", alias="APP_ENV")
 
@@ -38,6 +43,10 @@ class Settings(BaseSettings):
     @property
     def claude(self) -> dict:
         return self._yaml["claude"]
+
+    @property
+    def ollama(self) -> dict:
+        return self._yaml.get("ollama", {})
 
     @property
     def server(self) -> dict:

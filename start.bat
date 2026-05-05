@@ -51,7 +51,7 @@ echo [*] API docs: http://127.0.0.1:8000/docs
 echo [*] Press Ctrl+C to stop.
 echo.
 
-python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 --reload
+python run.py
 
 echo.
 echo [*] Server stopped.

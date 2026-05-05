@@ -62,6 +62,7 @@ def parse_mt5_message(raw: str | bytes) -> tuple[OHLCVData, AccountState]:
         balance=float(acct.get("balance", 0)),
         open_trades=int(acct.get("open_trades", 0)),
         daily_pnl=float(acct.get("daily_pnl", 0)),
+        currency=str(acct.get("currency", "USD")),
     )
 
     # --- OHLCV bars ---

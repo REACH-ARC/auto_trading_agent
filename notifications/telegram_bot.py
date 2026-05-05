@@ -4,6 +4,8 @@ TG-01 through TG-05
 """
 from __future__ import annotations
 
+import html
+import re
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
 
@@ -16,6 +18,7 @@ from telegram.ext import Application, CallbackQueryHandler, CommandHandler, Cont
 from backend.claude_analyst import SignalResult
 from backend.risk_manager import RiskDecision
 from backend.signal_logger import SignalStats
+from backend.model_manager import AVAILABLE_MODELS, AVAILABLE_STRATEGIES
 from config import settings
 
 # ---------------------------------------------------------------------------
@@ -25,6 +28,35 @@ from config import settings
 GetStatusFn = Callable[[], Awaitable[dict[str, Any]]]
 GetSymbolFn = Callable[[], str]
 SetSymbolFn = Callable[[str], None]
+GetModelFn = Callable[[], str]
+SetModelFn = Callable[[str], None]
+GetWatchlistFn = Callable[[], list[str]]
+GetStrategyFn = Callable[[], str]
+SetStrategyFn = Callable[[str], None]
+GetBoolFn = Callable[[], bool]
+SetBoolFn = Callable[[bool], None]
+
+# Telegram HTML mode only allows these tags; everything else must be stripped.
+_TG_ALLOWED_TAGS: frozenset[str] = frozenset({
+    "b", "strong", "i", "em", "u", "ins", "s", "strike", "del",
+    "code", "pre", "a", "tg-spoiler", "blockquote",
+})
+_TAG_RE = re.compile(r"<(/?)\s*([a-zA-Z][a-zA-Z0-9-]*)((?:\s[^>]*)?)>")
+
+
+def _sanitize_html(text: str) -> str:
+    """Strip tags not supported by Telegram's HTML parser, keep allowed ones."""
+    def _replace(m: re.Match) -> str:
+        tag = m.group(2).lower()
+        attrs = m.group(3)
+        # <span class="tg-spoiler"> is the one valid span variant
+        if tag == "span" and 'class="tg-spoiler"' in attrs:
+            return m.group(0)
+        if tag in _TG_ALLOWED_TAGS:
+            return m.group(0)
+        return ""  # strip unsupported tag
+    return _TAG_RE.sub(_replace, text)
+
 
 # Symbol category icons
 _SYMBOL_ICONS: dict[str, str] = {
@@ -58,11 +90,20 @@ class TelegramNotifier:
         )
         # Strip whitespace — a common .env copy-paste issue that causes silent mismatches
         self._chat_id: str = str(settings.telegram_chat_id).strip()
+        self._signal_channel_id: str = str(settings.telegram_signal_channel_id).strip()
         self._app: Application | None = None
         self._get_status: GetStatusFn | None = None
         self._get_symbol: GetSymbolFn | None = None
         self._set_symbol: SetSymbolFn | None = None
-        self._watchlist: list[str] = []
+        self._get_model: GetModelFn | None = None
+        self._set_model: SetModelFn | None = None
+        self._get_watchlist: GetWatchlistFn | None = None
+        self._get_strategy: GetStrategyFn | None = None
+        self._set_strategy: SetStrategyFn | None = None
+        self._get_auto_trade: GetBoolFn | None = None
+        self._set_auto_trade: SetBoolFn | None = None
+        self._get_scan_all: GetBoolFn | None = None
+        self._set_scan_all: SetBoolFn | None = None
 
         if not self._enabled:
             logger.info("Telegram notifications disabled (check settings.yaml + .env)")
@@ -78,7 +119,15 @@ class TelegramNotifier:
         get_status_fn: GetStatusFn | None = None,
         get_symbol_fn: GetSymbolFn | None = None,
         set_symbol_fn: SetSymbolFn | None = None,
-        watchlist: list[str] | None = None,
+        get_model_fn: GetModelFn | None = None,
+        set_model_fn: SetModelFn | None = None,
+        get_watchlist_fn: GetWatchlistFn | None = None,
+        get_strategy_fn: GetStrategyFn | None = None,
+        set_strategy_fn: SetStrategyFn | None = None,
+        get_auto_trade_fn: GetBoolFn | None = None,
+        set_auto_trade_fn: SetBoolFn | None = None,
+        get_scan_all_fn: GetBoolFn | None = None,
+        set_scan_all_fn: SetBoolFn | None = None,
     ) -> None:
         """Initialise the bot and start polling for commands."""
         if not self._enabled:
@@ -87,14 +136,25 @@ class TelegramNotifier:
         self._get_status = get_status_fn
         self._get_symbol = get_symbol_fn
         self._set_symbol = set_symbol_fn
-        self._watchlist = watchlist or settings.symbols.get("watchlist", [])
+        self._get_model = get_model_fn
+        self._set_model = set_model_fn
+        self._get_watchlist = get_watchlist_fn
+        self._get_strategy = get_strategy_fn
+        self._set_strategy = set_strategy_fn
+        self._get_auto_trade = get_auto_trade_fn
+        self._set_auto_trade = set_auto_trade_fn
+        self._get_scan_all = get_scan_all_fn
+        self._set_scan_all = set_scan_all_fn
 
         self._app = Application.builder().token(settings.telegram_bot_token).build()
 
         # Groups, supergroups, private chats
-        self._app.add_handler(CommandHandler("status", self._cmd_status))
-        self._app.add_handler(CommandHandler("market", self._cmd_market))
-        self._app.add_handler(CommandHandler("chatid", self._cmd_chatid))
+        self._app.add_handler(CommandHandler("status",   self._cmd_status))
+        self._app.add_handler(CommandHandler("market",   self._cmd_market))
+        self._app.add_handler(CommandHandler("model",    self._cmd_model))
+        self._app.add_handler(CommandHandler("strategy", self._cmd_strategy))
+        self._app.add_handler(CommandHandler("settings", self._cmd_settings))
+        self._app.add_handler(CommandHandler("chatid",   self._cmd_chatid))
 
         # Channels — channel_post updates are NOT handled by CommandHandler,
         # so we route them manually through a MessageHandler
@@ -105,8 +165,21 @@ class TelegramNotifier:
             )
         )
 
+        # Debug catch-all: log every callback query before the specific handlers.
+        # Helps diagnose whether button taps reach the bot at all.
+        self._app.add_handler(CallbackQueryHandler(self._cb_debug), group=-1)
+
         self._app.add_handler(
             CallbackQueryHandler(self._cb_market, pattern=r"^set_market:")
+        )
+        self._app.add_handler(
+            CallbackQueryHandler(self._cb_model, pattern=r"^set_model:")
+        )
+        self._app.add_handler(
+            CallbackQueryHandler(self._cb_strategy, pattern=r"^set_strategy:")
+        )
+        self._app.add_handler(
+            CallbackQueryHandler(self._cb_toggle_setting, pattern=r"^toggle_setting:")
         )
         self._app.add_error_handler(self._error_handler)
 
@@ -114,13 +187,22 @@ class TelegramNotifier:
 
         # Register commands so they appear in the Telegram command menu
         await self._app.bot.set_my_commands([
-            BotCommand("status", "Bot status and active market"),
-            BotCommand("market", "Select trading symbol"),
-            BotCommand("chatid", "Show this chat's ID (for setup/debug)"),
+            BotCommand("status",   "Bot status and active market"),
+            BotCommand("market",   "Select trading symbol"),
+            BotCommand("model",    "Switch AI model (Claude / Ollama / Strategy)"),
+            BotCommand("strategy", "Select rule-based strategy (when model=Strategy)"),
+            BotCommand("settings", "Toggle auto-trade and multi-market scan ON/OFF"),
+            BotCommand("chatid",   "Show this chat's ID (for setup/debug)"),
         ])
 
         await self._app.start()
-        await self._app.updater.start_polling(drop_pending_updates=True)
+        # Explicitly include callback_query so Telegram sends button-tap events.
+        # Without this, Telegram reuses the previous session's allowed_updates
+        # which may have been set before inline keyboards were added.
+        await self._app.updater.start_polling(
+            drop_pending_updates=True,
+            allowed_updates=["message", "channel_post", "callback_query"],
+        )
 
         active = self._get_symbol() if self._get_symbol else "—"
         logger.info(f"Telegram bot polling started — authorized chat_id={self._chat_id!r}")
@@ -151,7 +233,7 @@ class TelegramNotifier:
     async def send_signal_alert(
         self, signal: SignalResult, risk: RiskDecision
     ) -> None:
-        """Send a trade signal notification to the configured chat."""
+        """Send a trade signal notification to the configured chat and signal channel."""
         if not self._enabled:
             return
         if not settings.telegram.get("send_signal_alerts", True):
@@ -160,13 +242,16 @@ class TelegramNotifier:
         text = _format_signal_message(signal, risk)
         await self._send_raw(text)
 
+        if self._signal_channel_id:
+            await self._send_to(self._signal_channel_id, text)
+
     # ------------------------------------------------------------------
     # TG-04  Daily summary
     # ------------------------------------------------------------------
 
     async def send_agent_update(self, message: str) -> None:
         """Send a free-form agent decision update (HTML supported)."""
-        await self._send_raw(message)
+        await self._send_raw(_sanitize_html(message))
 
     async def send_daily_summary(self, stats: SignalStats) -> None:
         """Send the daily performance summary."""
@@ -218,7 +303,18 @@ class TelegramNotifier:
             try:
                 data = await self._get_status()
                 active = self._get_symbol() if self._get_symbol else None
-                text = _format_status(data, active_symbol=active)
+                model = self._get_model() if self._get_model else None
+                strategy = self._get_strategy() if self._get_strategy else None
+                auto_trade = self._get_auto_trade() if self._get_auto_trade else True
+                scan_all = self._get_scan_all() if self._get_scan_all else False
+                text = _format_status(
+                    data,
+                    active_symbol=active,
+                    active_model=model,
+                    active_strategy=strategy,
+                    auto_trade=auto_trade,
+                    scan_all=scan_all,
+                )
             except Exception as e:
                 logger.error(f"Status handler error: {e}")
                 text = "⚠️ Could not fetch status — check server logs."
@@ -241,9 +337,12 @@ class TelegramNotifier:
         # Parse /command or /command@botname
         cmd = msg.text.split()[0].lstrip("/").split("@")[0].lower()
         routes = {
-            "status":  self._cmd_status,
-            "market":  self._cmd_market,
-            "chatid":  self._cmd_chatid,
+            "status":    self._cmd_status,
+            "market":    self._cmd_market,
+            "model":     self._cmd_model,
+            "strategy":  self._cmd_strategy,
+            "settings":  self._cmd_settings,
+            "chatid":    self._cmd_chatid,
         }
         handler = routes.get(cmd)
         if handler:
@@ -315,15 +414,263 @@ class TelegramNotifier:
             reply_markup=markup,
         )
 
-    def _build_market_keyboard(self, active_symbol: str) -> InlineKeyboardMarkup:
-        """Build the 2-column inline keyboard from the watchlist."""
+    # ------------------------------------------------------------------
+    # /model command + callback
+    # ------------------------------------------------------------------
+
+    async def _cb_debug(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Catch-all callback logger — fires for every button tap regardless of data."""
+        query = update.callback_query
+        if query is None:
+            return
+        chat_id = update.effective_chat.id if update.effective_chat else "unknown"
+        logger.info(f"Telegram: [DEBUG] callback arrived — data={query.data!r} chat={chat_id}")
+
+    async def _cmd_model(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Show inline keyboard listing available AI models."""
+        chat_id = update.effective_chat.id if update.effective_chat else "unknown"
+        logger.info(f"Telegram: /model received from chat_id={chat_id}")
+
+        if update.effective_message is None or not self._is_authorized(update):
+            logger.warning(f"Telegram: /model rejected — not authorized (chat={chat_id})")
+            return
+
+        current = self._get_model() if self._get_model else "claude"
+        markup = self._build_model_keyboard(current)
+
+        await update.effective_message.reply_text(
+            f"🤖 <b>Select AI Model</b>\n\n"
+            f"Active now: <code>{AVAILABLE_MODELS.get(current, current)}</code>\n\n"
+            f"Tap to switch. Takes effect on the next M15 bar.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=markup,
+        )
+
+    async def _cb_model(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle model selection from inline keyboard."""
+        query = update.callback_query
+        if query is None:
+            return
+
+        chat_id = update.effective_chat.id if update.effective_chat else "unknown"
+        logger.info(f"Telegram: model callback received — data={query.data!r} chat={chat_id}")
+
+        if not self._is_authorized(update):
+            logger.warning(f"Telegram: model callback rejected — not authorized (chat={chat_id})")
+            await query.answer()
+            return
+
+        model_key = query.data.replace("set_model:", "")
+
+        if self._set_model:
+            try:
+                self._set_model(model_key)
+                logger.info(f"Telegram: AI model changed to {model_key}")
+            except ValueError as e:
+                await query.answer(f"Error: {e}", show_alert=True)
+                return
+
+        display = AVAILABLE_MODELS.get(model_key, model_key)
+        await query.answer(f"✅ Switched to {display}")
+
+        markup = self._build_model_keyboard(model_key)
+        await query.edit_message_text(
+            f"✅ <b>AI Model switched to <code>{display}</code></b>\n\n"
+            f"The agent will use <b>{display}</b> from the next M15 bar.\n"
+            f"Use /model to change again.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=markup,
+        )
+
+    # ------------------------------------------------------------------
+    # /strategy command + callback
+    # ------------------------------------------------------------------
+
+    async def _cmd_strategy(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Show inline keyboard to pick the active rule-based strategy."""
+        if update.effective_message is None or not self._is_authorized(update):
+            return
+
+        active_model = self._get_model() if self._get_model else "ollama"
+        current = self._get_strategy() if self._get_strategy else "ema_pullback"
+        markup = self._build_strategy_keyboard(current)
+
+        note = ""
+        if active_model != "strategy":
+            note = "\n\n⚠️ <i>Switch to Strategy mode first: /model → Strategy (No AI)</i>"
+
+        await update.effective_message.reply_text(
+            f"📐 <b>Select Rule-Based Strategy</b>\n\n"
+            f"Active now: <code>{AVAILABLE_STRATEGIES.get(current, current)}</code>"
+            f"{note}\n\n"
+            f"Tap a strategy to select it.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=markup,
+        )
+
+    async def _cb_strategy(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle strategy selection from inline keyboard."""
+        query = update.callback_query
+        if query is None:
+            return
+        if not self._is_authorized(update):
+            await query.answer()
+            return
+
+        strategy_key = query.data.replace("set_strategy:", "")
+
+        if self._set_strategy:
+            try:
+                self._set_strategy(strategy_key)
+                logger.info(f"Telegram: active strategy changed to {strategy_key}")
+            except ValueError as e:
+                await query.answer(f"Error: {e}", show_alert=True)
+                return
+
+        display = AVAILABLE_STRATEGIES.get(strategy_key, strategy_key)
+        await query.answer(f"✅ Strategy: {display}")
+
+        markup = self._build_strategy_keyboard(strategy_key)
+        await query.edit_message_text(
+            f"✅ <b>Strategy set to <code>{display}</code></b>\n\n"
+            f"Make sure /model is set to <b>Strategy (No AI)</b> to use it.\n"
+            f"Use /strategy to change again.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=markup,
+        )
+
+    # ------------------------------------------------------------------
+    # /settings command + toggle callback
+    # ------------------------------------------------------------------
+
+    async def _cmd_settings(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Show toggle buttons for auto-trade and multi-market scan."""
+        if update.effective_message is None or not self._is_authorized(update):
+            return
+
+        auto_trade = self._get_auto_trade() if self._get_auto_trade else True
+        scan_all   = self._get_scan_all()   if self._get_scan_all   else False
+        markup = self._build_settings_keyboard(auto_trade, scan_all)
+
+        await update.effective_message.reply_text(
+            self._settings_text(auto_trade, scan_all),
+            parse_mode=ParseMode.HTML,
+            reply_markup=markup,
+        )
+
+    async def _cb_toggle_setting(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle toggle button taps from /settings keyboard."""
+        query = update.callback_query
+        if query is None:
+            return
+        if not self._is_authorized(update):
+            await query.answer()
+            return
+
+        key = query.data.replace("toggle_setting:", "")
+
+        if key == "auto_trade":
+            current = self._get_auto_trade() if self._get_auto_trade else True
+            new_val = not current
+            if self._set_auto_trade:
+                self._set_auto_trade(new_val)
+            label = "ON ✅" if new_val else "OFF ❌"
+            logger.info(f"Telegram: auto_trade toggled → {new_val}")
+            await query.answer(f"Auto-Trade {label}")
+
+        elif key == "scan_all":
+            current = self._get_scan_all() if self._get_scan_all else False
+            new_val = not current
+            if self._set_scan_all:
+                self._set_scan_all(new_val)
+            label = "ON ✅" if new_val else "OFF ❌"
+            logger.info(f"Telegram: scan_all_symbols toggled → {new_val}")
+            await query.answer(f"Multi-Market Scan {label}")
+
+        else:
+            await query.answer("Unknown setting")
+            return
+
+        auto_trade = self._get_auto_trade() if self._get_auto_trade else True
+        scan_all   = self._get_scan_all()   if self._get_scan_all   else False
+        markup = self._build_settings_keyboard(auto_trade, scan_all)
+        await query.edit_message_text(
+            self._settings_text(auto_trade, scan_all),
+            parse_mode=ParseMode.HTML,
+            reply_markup=markup,
+        )
+
+    def _settings_text(self, auto_trade: bool, scan_all: bool) -> str:
+        at_icon  = "✅ ON" if auto_trade else "❌ OFF"
+        sa_icon  = "✅ ON" if scan_all   else "❌ OFF"
+        scan_note = (
+            "\n⚠️ <i>Multi-market scan is ON — bot will scan all watchlist symbols per bar and pick the best setup.</i>"
+            if scan_all else
+            "\n<i>Multi-market scan is OFF — bot trades the single active symbol only.</i>"
+        )
+        return (
+            f"⚙️ <b>Bot Settings</b>\n\n"
+            f"🤖 Auto-Trade:          <b>{at_icon}</b>\n"
+            f"   When ON, approved signals are placed automatically via MT5.\n"
+            f"   When OFF, signals are sent to Telegram only (alert mode).\n\n"
+            f"🌐 Multi-Market Scan:   <b>{sa_icon}</b>\n"
+            f"   When ON, every bar scans all watchlist symbols and picks the best signal.\n"
+            f"   When OFF, only the active market is analysed."
+            f"{scan_note}\n\n"
+            f"<i>Tap a button to toggle. Changes take effect on the next bar.</i>"
+        )
+
+    def _build_settings_keyboard(self, auto_trade: bool, scan_all: bool) -> InlineKeyboardMarkup:
+        at_label = f"🤖 Auto-Trade: {'✅ ON' if auto_trade else '❌ OFF'}  →  toggle"
+        sa_label = f"🌐 Multi-Market: {'✅ ON' if scan_all else '❌ OFF'}  →  toggle"
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton(at_label, callback_data="toggle_setting:auto_trade")],
+            [InlineKeyboardButton(sa_label, callback_data="toggle_setting:scan_all")],
+        ])
+
+    def _build_strategy_keyboard(self, active_strategy: str) -> InlineKeyboardMarkup:
+        """Build inline keyboard from available strategies."""
         buttons: list[InlineKeyboardButton] = []
-        for sym in self._watchlist:
+        for key, display in AVAILABLE_STRATEGIES.items():
+            label = f"✅ 📐 {display}" if key == active_strategy else f"📐 {display}"
+            buttons.append(InlineKeyboardButton(label, callback_data=f"set_strategy:{key}"))
+        rows = [buttons[i : i + 1] for i in range(0, len(buttons))]
+        return InlineKeyboardMarkup(rows)
+
+    def _build_model_keyboard(self, active_model: str) -> InlineKeyboardMarkup:
+        """Build inline keyboard from available models."""
+        buttons: list[InlineKeyboardButton] = []
+        icons = {"claude": "🔵", "ollama": "🟢", "strategy": "📐"}
+        for key, display in AVAILABLE_MODELS.items():
+            icon = icons.get(key, "⚪")
+            label = f"✅ {icon} {display}" if key == active_model else f"{icon} {display}"
+            buttons.append(InlineKeyboardButton(label, callback_data=f"set_model:{key}"))
+        rows = [buttons[i : i + 2] for i in range(0, len(buttons), 2)]
+        return InlineKeyboardMarkup(rows)
+
+    def _build_market_keyboard(self, active_symbol: str) -> InlineKeyboardMarkup:
+        """Build the 2-column inline keyboard from the dynamic watchlist."""
+        watchlist = self._get_watchlist() if self._get_watchlist else []
+        buttons: list[InlineKeyboardButton] = []
+        for sym in watchlist:
             icon = _symbol_icon(sym)
             label = f"✅ {icon} {sym}" if sym == active_symbol else f"{icon} {sym}"
             buttons.append(InlineKeyboardButton(label, callback_data=f"set_market:{sym}"))
 
-        # Arrange into rows of 2
         rows = [buttons[i : i + 2] for i in range(0, len(buttons), 2)]
         return InlineKeyboardMarkup(rows)
 
@@ -332,29 +679,32 @@ class TelegramNotifier:
     # ------------------------------------------------------------------
 
     async def _send_raw(self, text: str) -> None:
-        """Send a raw HTML message. Logs and swallows TelegramError."""
-        if not self._enabled:
+        """Send a raw HTML message to the main control chat."""
+        await self._send_to(self._chat_id, text)
+
+    async def _send_to(self, chat_id: str, text: str) -> None:
+        """Send a raw HTML message to any chat ID. Logs and swallows TelegramError."""
+        if not self._enabled or not chat_id:
             return
 
         try:
             if self._app is not None:
                 await self._app.bot.send_message(
-                    chat_id=self._chat_id,
+                    chat_id=chat_id,
                     text=text,
                     parse_mode=ParseMode.HTML,
                     disable_web_page_preview=True,
                 )
             else:
-                # Fallback: use async context manager so aiohttp session is cleaned up
                 async with Bot(token=settings.telegram_bot_token) as bot:
                     await bot.send_message(
-                        chat_id=self._chat_id,
+                        chat_id=chat_id,
                         text=text,
                         parse_mode=ParseMode.HTML,
                         disable_web_page_preview=True,
                     )
         except TelegramError as e:
-            logger.warning(f"Telegram send failed: {e}")
+            logger.warning(f"Telegram send failed (chat={chat_id}): {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -371,7 +721,7 @@ def _format_signal_message(signal: SignalResult, risk: RiskDecision) -> str:
     title = f"{icon} <b>{signal.symbol} — {signal.direction}</b>"
 
     if not signal.is_actionable:
-        reason = signal.reasoning[:200] if signal.reasoning else "No setup found."
+        reason = html.escape((signal.reasoning or "No setup found.")[:200])
         return (
             f"{title}\n\n"
             f"<i>No trade signal — {reason}</i>"
@@ -381,22 +731,22 @@ def _format_signal_message(signal: SignalResult, risk: RiskDecision) -> str:
     approved = "✅ Approved" if risk.approved else "❌ Blocked"
     conf_bar = _confidence_bar(signal.confidence)
 
-    # Truncate reasoning + invalidation
-    reasoning   = (signal.reasoning   or "")[:300]
-    invalidation = (signal.invalidation or "")[:150]
+    # Truncate and escape reasoning + invalidation (Claude output may contain < > &)
+    reasoning    = html.escape((signal.reasoning    or "")[:300])
+    invalidation = html.escape((signal.invalidation or "")[:150])
 
     confluence = ""
     if signal.confluence_factors:
-        factors = "\n".join(f"  • {f}" for f in signal.confluence_factors[:6])
+        factors = "\n".join(f"  • {html.escape(f)}" for f in signal.confluence_factors[:6])
         confluence = f"\n\n<b>Confluence:</b>\n{factors}"
 
     warnings = ""
     if risk.warnings:
-        warnings = "\n⚠️ " + " | ".join(risk.warnings)
+        warnings = "\n⚠️ " + " | ".join(html.escape(w) for w in risk.warnings)
 
     rejection = ""
     if not risk.approved and risk.reasons:
-        rejection = "\n🚫 " + " | ".join(risk.reasons)
+        rejection = "\n🚫 " + " | ".join(html.escape(r) for r in risk.reasons)
 
     def _p(v: float | None) -> str:
         return f"{v:.5f}" if v is not None else "n/a"
@@ -456,7 +806,14 @@ def _format_daily_summary(stats: SignalStats) -> str:
     )
 
 
-def _format_status(data: dict, active_symbol: str | None = None) -> str:
+def _format_status(
+    data: dict,
+    active_symbol: str | None = None,
+    active_model: str | None = None,
+    active_strategy: str | None = None,
+    auto_trade: bool = True,
+    scan_all: bool = False,
+) -> str:
     """TG-05 — Format /status response as Telegram HTML."""
     uptime_s   = int(data.get("uptime_seconds", 0))
     uptime_str = _fmt_uptime(uptime_s)
@@ -477,15 +834,33 @@ def _format_status(data: dict, active_symbol: str | None = None) -> str:
 
     sym_line = f"🎯 Active Market:     <b><code>{active_symbol}</code></b>\n" if active_symbol else ""
 
+    _model = active_model or "ollama"
+    model_display = AVAILABLE_MODELS.get(_model, _model)
+    model_icons = {"claude": "🔵", "ollama": "🟢", "strategy": "📐"}
+    model_icon = model_icons.get(_model, "⚪")
+    model_line = f"{model_icon} Mode:              <b>{model_display}</b>\n"
+
+    strategy_line = ""
+    if _model == "strategy" and active_strategy:
+        strat_display = AVAILABLE_STRATEGIES.get(active_strategy, active_strategy)
+        strategy_line = f"📐 Strategy:         <b>{strat_display}</b>\n"
+
+    at_icon = "✅ ON" if auto_trade else "❌ OFF"
+    sa_icon = "✅ ON" if scan_all   else "❌ OFF"
+
     return (
         f"🤖 <b>AI Analyst Bot Status</b>\n\n"
         f"{sym_line}"
+        f"{model_line}"
+        f"{strategy_line}"
+        f"🤖 Auto-Trade:        <b>{at_icon}</b>\n"
+        f"🌐 Multi-Market:      <b>{sa_icon}</b>\n"
         f"⏱ Uptime:            <b>{uptime_str}</b>\n"
         f"{fetch_icon} MT5 Fetcher:      <b>{'Active' if fetcher else 'Inactive'}</b>\n"
         f"{zmq_icon} ZeroMQ:           <b>{'Active' if zmq_alive else 'Inactive'}</b>\n"
         f"📊 Cycles (session):  <b>{sigs}</b>\n"
         f"🕐 Last Cycle:        <b>{last_str}</b>\n\n"
-        f"<i>Use /market to switch the trading symbol.</i>"
+        f"<i>Use /market · /model · /strategy · /settings to configure.</i>"
     )
 
 
