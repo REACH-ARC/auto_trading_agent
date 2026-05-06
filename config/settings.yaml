@@ -46,10 +46,10 @@ risk:
   # Per-account-type lot limits — auto-detected from MT5 account currency
   cent:                             # USC cent account (100 USC = 1 USD)
     min_lot_size: 0.10
-    max_lot_size: 1.0
+    max_lot_size: 10.0
   standard:                         # USD standard account
     min_lot_size: 0.01
-    max_lot_size: 0.30
+    max_lot_size: 1.0
   max_daily_loss_percent: 3.0       # pause bot if daily loss hits 3%
   min_sl_atr_multiplier: 0.5
   max_sl_atr_multiplier: 3.0

@@ -295,8 +295,7 @@ async def _zmq_listener() -> None:
 
 async def _send_daily_summary() -> None:
     """APScheduler job — fetch today's stats and push to Telegram."""
-    from datetime import date
-    today_start = datetime.combine(date.today(), datetime.min.time()).replace(tzinfo=timezone.utc)
+    today_start = datetime.combine(datetime.now(timezone.utc).date(), datetime.min.time()).replace(tzinfo=timezone.utc)
     stats = await get_stats(since=today_start)
     await telegram.send_daily_summary(stats)
     logger.info("Daily summary sent to Telegram")
