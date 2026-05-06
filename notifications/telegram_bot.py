@@ -19,6 +19,7 @@ from backend.claude_analyst import SignalResult
 from backend.risk_manager import RiskDecision
 from backend.signal_logger import SignalStats
 from backend.model_manager import AVAILABLE_MODELS, AVAILABLE_STRATEGIES
+from backend.news_filter import NewsEvent, get_all_upcoming_events, refresh_cache_if_stale
 from config import settings
 
 # ---------------------------------------------------------------------------
@@ -154,6 +155,7 @@ class TelegramNotifier:
         self._app.add_handler(CommandHandler("model",    self._cmd_model))
         self._app.add_handler(CommandHandler("strategy", self._cmd_strategy))
         self._app.add_handler(CommandHandler("settings", self._cmd_settings))
+        self._app.add_handler(CommandHandler("news",     self._cmd_news))
         self._app.add_handler(CommandHandler("chatid",   self._cmd_chatid))
 
         # Channels — channel_post updates are NOT handled by CommandHandler,
@@ -192,6 +194,7 @@ class TelegramNotifier:
             BotCommand("model",    "Switch AI model (Claude / Ollama / Strategy)"),
             BotCommand("strategy", "Select rule-based strategy (when model=Strategy)"),
             BotCommand("settings", "Toggle auto-trade and multi-market scan ON/OFF"),
+            BotCommand("news",     "Show upcoming high-impact news events (next 4h)"),
             BotCommand("chatid",   "Show this chat's ID (for setup/debug)"),
         ])
 
@@ -248,6 +251,12 @@ class TelegramNotifier:
     # ------------------------------------------------------------------
     # TG-04  Daily summary
     # ------------------------------------------------------------------
+
+    async def send_news_warning(self, events: list[NewsEvent]) -> None:
+        """Send a pre-news alert when high-impact events are approaching."""
+        if not self._enabled:
+            return
+        await self._send_raw(_format_news_warning(events))
 
     async def send_agent_update(self, message: str) -> None:
         """Send a free-form agent decision update (HTML supported)."""
@@ -342,6 +351,7 @@ class TelegramNotifier:
             "model":     self._cmd_model,
             "strategy":  self._cmd_strategy,
             "settings":  self._cmd_settings,
+            "news":      self._cmd_news,
             "chatid":    self._cmd_chatid,
         }
         handler = routes.get(cmd)
@@ -568,6 +578,33 @@ class TelegramNotifier:
             self._settings_text(auto_trade, scan_all),
             parse_mode=ParseMode.HTML,
             reply_markup=markup,
+        )
+
+    # ------------------------------------------------------------------
+    # /news command
+    # ------------------------------------------------------------------
+
+    async def _cmd_news(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Show upcoming high-impact news events for the next 4 hours."""
+        if update.effective_message is None or not self._is_authorized(update):
+            return
+
+        await refresh_cache_if_stale()
+        now = datetime.now(timezone.utc)
+        events = get_all_upcoming_events(now, lookahead_hours=4.0)
+
+        if not events:
+            await update.effective_message.reply_text(
+                "📰 <b>Upcoming News</b>\n\nNo high/medium-impact events in the next 4 hours. Trading is clear.",
+                parse_mode=ParseMode.HTML,
+            )
+            return
+
+        await update.effective_message.reply_text(
+            _format_news_schedule(events, now),
+            parse_mode=ParseMode.HTML,
         )
 
     async def _cb_toggle_setting(
@@ -875,6 +912,41 @@ def _fmt_uptime(seconds: int) -> str:
     if h > 0:
         return f"{h}h {m}m"
     return f"{m}m"
+
+
+def _format_news_schedule(events: list[NewsEvent], now: datetime) -> str:
+    """Format upcoming news events as Telegram HTML for the /news command."""
+    lines = [f"📰 <b>Upcoming News Events (next 4h)</b> — {now.strftime('%H:%M UTC')}\n"]
+    block_before = settings.news_filter.get("block_minutes_before", 30)
+    block_after  = settings.news_filter.get("block_minutes_after", 30)
+    for e in events:
+        mins_until = int((e.event_time - now).total_seconds() / 60)
+        impact_icon = "🔴" if e.impact == "HIGH" else "🟡"
+        time_str = e.event_time.strftime("%H:%M UTC")
+        if e.is_blocking(now):
+            timing = "⛔ <b>BLOCKING NOW</b>"
+        elif mins_until <= block_before:
+            timing = f"⚠️ block starts in {mins_until}m"
+        else:
+            timing = f"in {mins_until}m"
+        lines.append(
+            f"{impact_icon} <b>{e.currency}</b> — {html.escape(e.title)}\n"
+            f"   🕐 {time_str}  ({timing})\n"
+            f"   Block window: ±{block_before}m / +{block_after}m"
+        )
+    return "\n\n".join(lines)
+
+
+def _format_news_warning(events: list[NewsEvent]) -> str:
+    """Format approaching news events as a proactive Telegram warning."""
+    count = len(events)
+    lines = [f"⚠️ <b>News Alert — {count} event{'s' if count > 1 else ''} approaching</b>"]
+    for e in events:
+        impact_icon = "🔴" if e.impact == "HIGH" else "🟡"
+        time_str = e.event_time.strftime("%H:%M UTC")
+        lines.append(f"{impact_icon} <b>{e.currency}</b> — {html.escape(e.title)}  @ {time_str}")
+    lines.append("\n<i>New trades will be paused during the block window.</i>")
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------

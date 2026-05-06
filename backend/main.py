@@ -11,7 +11,7 @@ import sys
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -103,6 +103,9 @@ class _AppState:
 
 
 _state = _AppState()
+
+# Tracks news events we've already warned about (avoids duplicate Telegram alerts)
+_warned_events: set[str] = set()
 
 # Cache tick info per symbol so we don't fetch on every bar
 _tick_info_cache: dict[str, dict] = {}
@@ -301,6 +304,42 @@ async def _send_daily_summary() -> None:
     logger.info("Daily summary sent to Telegram")
 
 
+async def _refresh_news_cache() -> None:
+    """APScheduler job — proactively refresh the Forex Factory news cache."""
+    from backend.news_filter import fetch_calendar, _cache as _news_cache
+    try:
+        events = await fetch_calendar()
+        _news_cache.update(events)
+    except Exception as e:
+        logger.warning(f"Proactive news cache refresh failed: {e}")
+
+
+async def _check_news_warning() -> None:
+    """APScheduler job — send Telegram alert when high-impact news is approaching."""
+    from backend.news_filter import get_all_upcoming_events
+    now = datetime.now(timezone.utc)
+    block_before: int = settings.news_filter.get("block_minutes_before", 30)
+    upcoming = get_all_upcoming_events(now, lookahead_hours=block_before / 60)
+
+    new_warnings = []
+    for event in upcoming:
+        key = f"{event.event_time.isoformat()}|{event.currency}|{event.title}"
+        if key not in _warned_events:
+            _warned_events.add(key)
+            new_warnings.append(event)
+
+    # Prune warned entries for events that passed more than 2 hours ago
+    cutoff = now - timedelta(hours=2)
+    _warned_events.difference_update(
+        k for k in list(_warned_events)
+        if datetime.fromisoformat(k.split("|")[0]) < cutoff
+    )
+
+    if new_warnings:
+        logger.info(f"News warning: {len(new_warnings)} approaching event(s)")
+        await telegram.send_news_warning(new_warnings)
+
+
 async def _on_scanner_signal(result: ScanResult) -> None:
     """
     Callback invoked by the scanner for each top-ranked signal per cycle.
@@ -491,6 +530,27 @@ async def _lifespan(app: FastAPI):
     else:
         logger.info("Scanner disabled in settings.yaml (scanner.enabled=false)")
 
+    # News cache proactive refresh job
+    news_refresh_hours: int = settings.news_filter.get("calendar_refresh_hours", 4)
+    _state.scheduler.add_job(
+        _refresh_news_cache,
+        trigger="interval",
+        hours=news_refresh_hours,
+        id="news_cache_refresh",
+        next_run_time=None,
+    )
+    logger.info(f"News cache refresh scheduled — every {news_refresh_hours}h")
+
+    # Pre-news warning job — runs every warning_check_interval_min minutes
+    warn_interval: int = settings.news_filter.get("warning_check_interval_min", 15)
+    _state.scheduler.add_job(
+        _check_news_warning,
+        trigger="interval",
+        minutes=warn_interval,
+        id="news_warning_check",
+    )
+    logger.info(f"News warning check scheduled — every {warn_interval} min")
+
     _state.scheduler.start()
     logger.info(f"APScheduler started — daily summary at {summary_time} UTC")
 
@@ -605,6 +665,38 @@ async def scanner_status() -> dict:
         "scanner_cycles":      _state.scanner_cycles,
         "last_scan_at":        _state.last_scan_at.isoformat() if _state.last_scan_at else None,
         "last_scan_top_symbol": _state.last_scan_top_symbol,
+    }
+
+
+# ---------------------------------------------------------------------------
+# GET /news — upcoming high-impact news from Forex Factory calendar
+# ---------------------------------------------------------------------------
+
+@app.get("/news", tags=["monitoring"])
+async def upcoming_news(hours: int = 4) -> dict:
+    """Return upcoming high/medium-impact news events from the Forex Factory calendar."""
+    from backend.news_filter import get_all_upcoming_events, refresh_cache_if_stale
+    if hours < 1 or hours > 48:
+        raise HTTPException(status_code=422, detail="hours must be between 1 and 48")
+    await refresh_cache_if_stale()
+    now = datetime.now(timezone.utc)
+    events = get_all_upcoming_events(now, lookahead_hours=float(hours))
+    return {
+        "hours_ahead": hours,
+        "count": len(events),
+        "checked_at": now.isoformat(),
+        "events": [
+            {
+                "title":          e.title,
+                "currency":       e.currency,
+                "impact":         e.impact,
+                "event_time":     e.event_time.isoformat(),
+                "block_start":    e.block_start.isoformat(),
+                "block_end":      e.block_end.isoformat(),
+                "is_blocking_now": e.is_blocking(now),
+            }
+            for e in events
+        ],
     }
 
 

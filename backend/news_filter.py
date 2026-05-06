@@ -199,6 +199,20 @@ def get_upcoming_events(
     ]
 
 
+def get_all_upcoming_events(dt: datetime, lookahead_hours: float = 4.0) -> list[NewsEvent]:
+    """Return all cached events (any currency) in the next N hours, sorted by event time."""
+    blocked_impacts: list[str] = settings.news_filter["impact_levels"]
+    window_end = dt + timedelta(hours=lookahead_hours)
+    return sorted(
+        (
+            e for e in _cache.events
+            if e.impact in blocked_impacts
+            and dt <= e.event_time <= window_end
+        ),
+        key=lambda e: e.event_time,
+    )
+
+
 # ---------------------------------------------------------------------------
 # NEWS-04  Block check — public API
 # ---------------------------------------------------------------------------

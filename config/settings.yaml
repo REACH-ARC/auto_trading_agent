@@ -63,7 +63,10 @@ news_filter:
   block_minutes_after: 30
   impact_levels:                    # block these impact levels
     - "HIGH"
+    - "MEDIUM"
   calendar_refresh_hours: 4
+  warning_minutes_before: 30        # warn when event is within N minutes (matches block_minutes_before)
+  warning_check_interval_min: 15    # how often the warning job runs
 
 mt5_fetcher:
   enabled: true
