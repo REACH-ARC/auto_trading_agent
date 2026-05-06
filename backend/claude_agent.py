@@ -80,7 +80,7 @@ Call send_update() with a summary covering:
 - BTC often trends strongly; ride winners with trailing stops
 
 ## Hard rules (also enforced server-side)
-- Never risk more than 1% of balance per trade
+- Risk exactly the fixed SL amount per trade: 1 000 USC (cent) or $50 USD (standard) — never % of balance
 - Never exceed 3 open trades
 - Never trade when daily loss limit is breached
 - SL must always be structure-based, never a fixed pip value
@@ -92,15 +92,14 @@ NOTE: This is a **cent account** (USC). 100 USC = 1 USD. Account balance display
 
 - If confidence >= 65 AND no open position in the same direction for this symbol:
   a. Call get_symbol_info(symbol) to confirm tick value and lot constraints
-  b. Calculate lot_size using 1% risk rule:
-       risk_usc = balance × 0.01
-       lot_size = risk_usc / (SL_distance_in_price × tick_value / tick_size)
+  b. Calculate lot_size using the FIXED SL amount (1 000 USC per trade — do NOT use % of balance):
+       lot_size = 1000 / (SL_distance_in_price × tick_value / tick_size)
      Then scale by confidence:
-       - confidence 65–74 → use 0.1 lots (minimum, cautious)
-       - confidence 75–84 → use 0.3–0.5 lots (moderate)
-       - confidence 85–94 → use 0.5–0.8 lots (confident)
-       - confidence 95–100 → use 0.8–1.0 lots (high conviction)
-     Always clamp: minimum 0.1, maximum 1.0. Round to broker lot_step.
+       - confidence 65–74 → use 70% of calculated lots (cautious)
+       - confidence 75–84 → use 85% of calculated lots (moderate)
+       - confidence 85–94 → use 100% of calculated lots (confident)
+       - confidence 95–100 → use 100% of calculated lots (high conviction)
+     Clamp to broker min_lot and max_lot from get_symbol_info(). Round to broker lot_step.
   c. Set SL at the nearest structural invalidation level (swing high/low)
   d. Set TP1 = entry ± (SL_distance × 1.5) — this is the only TP; MT5 closes the full position here automatically
   e. Call place_order() with order_type="MARKET" only — always enter at current price
@@ -111,15 +110,14 @@ NOTE: This is a **standard account** (USD). Account balance is in real USD.
 
 - If confidence >= 65 AND no open position in the same direction for this symbol:
   a. Call get_symbol_info(symbol) to confirm tick value and lot constraints
-  b. Calculate lot_size using 1% risk rule:
-       risk_usd = balance × 0.01
-       lot_size = risk_usd / (SL_distance_in_price × tick_value / tick_size)
+  b. Calculate lot_size using the FIXED SL amount ($50 USD per trade — do NOT use % of balance):
+       lot_size = 50 / (SL_distance_in_price × tick_value / tick_size)
      Then scale by confidence:
-       - confidence 65–74 → use 50% of calculated lots (cautious)
-       - confidence 75–84 → use 75% of calculated lots (moderate)
+       - confidence 65–74 → use 70% of calculated lots (cautious)
+       - confidence 75–84 → use 85% of calculated lots (moderate)
        - confidence 85–94 → use 100% of calculated lots (full risk)
-       - confidence 95–100 → use 100%, may add up to 25% extra on very high conviction
-     Clamp to broker min/max lot from get_symbol_info(). Round to broker lot_step.
+       - confidence 95–100 → use 100% of calculated lots (high conviction)
+     Clamp to broker min_lot and max_lot from get_symbol_info(). Round to broker lot_step.
   c. Set SL at the nearest structural invalidation level (swing high/low)
   d. Set TP1 = entry ± (SL_distance × 1.5) — this is the only TP; MT5 closes the full position here automatically
   e. Call place_order() with order_type="MARKET" only — always enter at current price
@@ -200,7 +198,7 @@ _TOOLS = [
             "properties": {
                 "symbol": {"type": "string"},
                 "direction": {"type": "string", "enum": ["BUY", "SELL"]},
-                "lot_size": {"type": "number", "description": "Position size in lots (0.1–1.0)"},
+                "lot_size": {"type": "number", "description": "Position size in lots — calculated from fixed SL amount, clamped to broker min/max from get_symbol_info()"},
                 "sl": {"type": "number", "description": "Stop loss price (structure-based)"},
                 "tp1": {"type": "number", "description": "Take profit — MT5 closes full position here (1.5R)"},
                 "comment": {"type": "string", "description": "Trade label (max 31 chars)"},
