@@ -124,9 +124,29 @@ NOTE: This is a **standard account** (USD). Account balance is in real USD.
 - If confidence < 65: NO_TRADE. Note what is missing."""
 
 
-def _make_system_prompt(is_cent: bool) -> str:
+_ALERT_ONLY_SUFFIX = """
+
+## ALERT-ONLY MODE — auto_trade is OFF
+place_order() is NOT available. Do not attempt to trade.
+Analyse the market and manage existing positions as normal.
+In your send_update(), include the trade you WOULD have placed:
+direction, entry, SL, TP, lot size, and reason — so the trader can decide manually.
+"""
+
+
+def _make_system_prompt(is_cent: bool, auto_trade: bool = True) -> str:
     step4 = _STEP4_CENT if is_cent else _STEP4_STANDARD
-    return _SYSTEM_PROMPT_TEMPLATE.replace("<<STEP4>>", step4)
+    prompt = _SYSTEM_PROMPT_TEMPLATE.replace("<<STEP4>>", step4)
+    if not auto_trade:
+        prompt += _ALERT_ONLY_SUFFIX
+    return prompt
+
+
+def _get_tools(auto_trade: bool = True) -> list[dict]:
+    """Return the agent tool list. Removes place_order when auto_trade is disabled."""
+    if auto_trade:
+        return _TOOLS
+    return [t for t in _TOOLS if t["name"] != "place_order"]
 
 # ---------------------------------------------------------------------------
 # Tool schemas
@@ -317,7 +337,7 @@ def _get_client() -> anthropic.Anthropic:
 # OpenAI-compat client for Ollama
 # ---------------------------------------------------------------------------
 
-def _openai_tools() -> list[dict]:
+def _openai_tools(auto_trade: bool = True) -> list[dict]:
     """Convert Anthropic tool schemas to OpenAI function-call format."""
     return [
         {
@@ -328,7 +348,7 @@ def _openai_tools() -> list[dict]:
                 "parameters": t["input_schema"],
             },
         }
-        for t in _TOOLS
+        for t in _get_tools(auto_trade)
     ]
 
 
@@ -387,6 +407,7 @@ async def _run_agent_ollama(
     max_iterations: int = 15,
     level_hits=None,
     initial_prompt: str = "",
+    auto_trade: bool = True,
 ) -> AgentResult:
     try:
         from openai import AsyncOpenAI
@@ -399,8 +420,8 @@ async def _run_agent_ollama(
     model_name: str = ollama_cfg.get("model", "gemini-3-flash-preview:latest")
 
     client = AsyncOpenAI(base_url=base_url, api_key="ollama")
-    ot = _openai_tools()
-    system_prompt = _make_system_prompt(account.is_cent)
+    ot = _openai_tools(auto_trade)
+    system_prompt = _make_system_prompt(account.is_cent, auto_trade)
 
     messages: list[dict] = [
         {"role": "system", "content": system_prompt},
@@ -521,12 +542,14 @@ async def _run_agent_claude(
     telegram_notifier=None,
     max_iterations: int = 15,
     level_hits=None,
+    auto_trade: bool = True,
 ) -> AgentResult:
     """Claude (Anthropic) backend — uses tool_use blocks and prompt caching."""
     result = AgentResult(symbol=symbol)
     client = _get_client()
     initial_prompt = _build_initial_prompt(symbol, account, level_hits)
-    system_prompt = _make_system_prompt(account.is_cent)
+    system_prompt = _make_system_prompt(account.is_cent, auto_trade)
+    active_tools = _get_tools(auto_trade)
 
     messages: list[dict] = [{"role": "user", "content": initial_prompt}]
     total_input = total_output = total_cache_read = total_cache_write = 0
@@ -544,7 +567,7 @@ async def _run_agent_claude(
                         "cache_control": {"type": "ephemeral"},
                     }
                 ],
-                tools=_TOOLS,
+                tools=active_tools,
                 messages=messages,
             )
 
@@ -623,8 +646,9 @@ async def run_agent(
     Dispatches to Claude or Ollama backend based on the active model selection.
     Switch models at runtime via Telegram /model command.
     """
-    active = model_manager.get_active_model()
-    logger.info(f"run_agent — {symbol} using model={active}")
+    active     = model_manager.get_active_model()
+    auto_trade = model_manager.get_auto_trade()
+    logger.info(f"run_agent — {symbol} model={active} auto_trade={auto_trade}")
 
     if active == "ollama":
         initial_prompt = _build_initial_prompt(symbol, account, level_hits)
@@ -635,6 +659,7 @@ async def run_agent(
             max_iterations=max_iterations,
             level_hits=level_hits,
             initial_prompt=initial_prompt,
+            auto_trade=auto_trade,
         )
 
     return await _run_agent_claude(
@@ -643,4 +668,5 @@ async def run_agent(
         telegram_notifier=telegram_notifier,
         max_iterations=max_iterations,
         level_hits=level_hits,
+        auto_trade=auto_trade,
     )
