@@ -96,6 +96,7 @@ def get_market_snapshot(symbol: str) -> dict:
         from backend.mt5_fetcher import fetch_ohlcv
         from backend.indicators import compute_indicators
         from backend.claude_analyst import format_market_snapshot
+        from backend.pattern_analyst import detect_patterns
 
         bars = int(settings.mt5_fetcher.get("bars_per_tf", 100))
         ohlcv = fetch_ohlcv(symbol, bars)
@@ -103,7 +104,8 @@ def get_market_snapshot(symbol: str) -> dict:
             return {"error": f"No data for {symbol} — is it in Market Watch?"}
 
         indicators = compute_indicators(ohlcv)
-        snapshot_text = format_market_snapshot(ohlcv, indicators)
+        patterns   = detect_patterns(ohlcv)
+        snapshot_text = format_market_snapshot(ohlcv, indicators, patterns)
 
         return {
             "symbol": symbol,

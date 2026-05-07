@@ -16,6 +16,7 @@ from loguru import logger
 
 from config import settings
 from backend.indicators import IndicatorResult, OHLCVData, SRLevel
+from backend.pattern_analyst import PatternResult, detect_patterns
 
 # ---------------------------------------------------------------------------
 # AI-01  Base structure — types & constants
@@ -148,7 +149,35 @@ def _fmt_rsi(value: float) -> str:
     return f"{value:.1f}"
 
 
-def format_market_snapshot(data: OHLCVData, indicators: IndicatorResult) -> str:
+def _fmt_patterns(patterns: PatternResult) -> list[str]:
+    """Format detected patterns as snapshot lines for Claude."""
+    lines: list[str] = ["", "--- Pattern Analysis ---"]
+
+    if patterns.candle_patterns:
+        lines.append("  Candlestick:")
+        for p in patterns.candle_patterns:
+            lines.append(f"    [{p.timeframe}] {p.name} — {p.direction} ({p.strength})")
+    else:
+        lines.append("  Candlestick: None detected on M15/H1/H4")
+
+    if patterns.chart_patterns:
+        lines.append("  Chart:")
+        for p in patterns.chart_patterns:
+            lines.append(
+                f"    [{p.timeframe}] {p.name} — {p.direction} "
+                f"({p.confidence} confidence)  key level: {p.key_level}"
+            )
+    else:
+        lines.append("  Chart: None detected on H4/D1")
+
+    return lines
+
+
+def format_market_snapshot(
+    data: OHLCVData,
+    indicators: IndicatorResult,
+    patterns: PatternResult | None = None,
+) -> str:
     """Convert raw OHLCV + indicators into a structured text prompt for Claude."""
     tfs = list(data.timeframes.keys())
     current_price = data.timeframes[tfs[0]][-1].close
@@ -202,6 +231,12 @@ def format_market_snapshot(data: OHLCVData, indicators: IndicatorResult) -> str:
         f"",
         f"--- Support & Resistance (H4, top 6 by strength) ---",
         _fmt_sr(indicators.support_resistance, current_price),
+    ]
+
+    if patterns is not None:
+        lines.extend(_fmt_patterns(patterns))
+
+    lines += [
         f"",
         f"=== END SNAPSHOT ===",
         f"",
@@ -392,7 +427,8 @@ def analyse(data: OHLCVData, indicators: IndicatorResult) -> SignalResult:
     Full pipeline: format snapshot → call Claude → parse → filter → return signal.
     This is the single entry point called by the backend server.
     """
-    snapshot = format_market_snapshot(data, indicators)
+    patterns = detect_patterns(data)
+    snapshot = format_market_snapshot(data, indicators, patterns)
 
     logger.info(f"Requesting Claude analysis for {data.symbol}…")
     raw_text, usage = _call_claude(snapshot)
