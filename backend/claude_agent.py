@@ -135,7 +135,48 @@ direction, entry, SL, TP, lot size, and reason — so the trader can decide manu
 
 
 def _make_system_prompt(is_cent: bool, auto_trade: bool = True) -> str:
-    step4 = _STEP4_CENT if is_cent else _STEP4_STANDARD
+    sl_usc = model_manager.get_sl_amount_usc()
+    sl_usd = model_manager.get_sl_amount_usd()
+
+    if is_cent:
+        step4 = (
+            f"NOTE: This is a **cent account** (USC). 100 USC = 1 USD. Account balance displayed in USC.\n\n"
+            f"- If confidence >= 65 AND no open position in the same direction for this symbol:\n"
+            f"  a. Call get_symbol_info(symbol) to confirm tick value and lot constraints\n"
+            f"  b. Calculate lot_size using the FIXED SL amount ({sl_usc:,.0f} USC per trade"
+            f" — do NOT use % of balance):\n"
+            f"       lot_size = {sl_usc:,.0f} / (SL_distance_in_price x tick_value / tick_size)\n"
+            f"     Then scale by confidence:\n"
+            f"       - confidence 65-74  -> use 70% of calculated lots (cautious)\n"
+            f"       - confidence 75-84  -> use 85% of calculated lots (moderate)\n"
+            f"       - confidence 85-94  -> use 100% of calculated lots (confident)\n"
+            f"       - confidence 95-100 -> use 100% of calculated lots (high conviction)\n"
+            f"     Clamp to broker min_lot and max_lot from get_symbol_info(). Round to broker lot_step.\n"
+            f"  c. Set SL at the nearest structural invalidation level (swing high/low)\n"
+            f"  d. Set TP1 = entry +/- (SL_distance x 1.5) — MT5 closes the full position here automatically\n"
+            f"  e. Call place_order() with order_type=\"MARKET\" only — always enter at current price\n"
+            f"- If confidence < 65: NO_TRADE. Note what is missing."
+        )
+    else:
+        step4 = (
+            f"NOTE: This is a **standard account** (USD). Account balance is in real USD.\n\n"
+            f"- If confidence >= 65 AND no open position in the same direction for this symbol:\n"
+            f"  a. Call get_symbol_info(symbol) to confirm tick value and lot constraints\n"
+            f"  b. Calculate lot_size using the FIXED SL amount (${sl_usd:,.2f} USD per trade"
+            f" — do NOT use % of balance):\n"
+            f"       lot_size = {sl_usd:,.2f} / (SL_distance_in_price x tick_value / tick_size)\n"
+            f"     Then scale by confidence:\n"
+            f"       - confidence 65-74  -> use 70% of calculated lots (cautious)\n"
+            f"       - confidence 75-84  -> use 85% of calculated lots (moderate)\n"
+            f"       - confidence 85-94  -> use 100% of calculated lots (full risk)\n"
+            f"       - confidence 95-100 -> use 100% of calculated lots (high conviction)\n"
+            f"     Clamp to broker min_lot and max_lot from get_symbol_info(). Round to broker lot_step.\n"
+            f"  c. Set SL at the nearest structural invalidation level (swing high/low)\n"
+            f"  d. Set TP1 = entry +/- (SL_distance x 1.5) — MT5 closes the full position here automatically\n"
+            f"  e. Call place_order() with order_type=\"MARKET\" only — always enter at current price\n"
+            f"- If confidence < 65: NO_TRADE. Note what is missing."
+        )
+
     prompt = _SYSTEM_PROMPT_TEMPLATE.replace("<<STEP4>>", step4)
     if not auto_trade:
         prompt += _ALERT_ONLY_SUFFIX

@@ -9,9 +9,14 @@ from config import settings as _settings
 _active_model: str = "ollama"
 _active_strategy: str = "ema_pullback"
 
-_str_cfg = _settings._yaml.get("strategy", {})
-_auto_trade: bool = bool(_str_cfg.get("auto_trade", True))
+_str_cfg  = _settings._yaml.get("strategy", {})
+_risk_cfg = _settings._yaml.get("risk", {})
+
+_auto_trade:      bool  = bool(_str_cfg.get("auto_trade", True))
 _scan_all_symbols: bool = bool(_str_cfg.get("scan_all_symbols", False))
+
+_sl_amount_usd: float = float(_risk_cfg.get("sl_amount_usd", 50.0))
+_sl_amount_usc: float = float(_risk_cfg.get("sl_amount_usc", 1000.0))
 
 AVAILABLE_MODELS: dict[str, str] = {
     "claude":    "External Model",
@@ -72,3 +77,25 @@ def get_scan_all_symbols() -> bool:
 def set_scan_all_symbols(value: bool) -> None:
     global _scan_all_symbols
     _scan_all_symbols = value
+
+
+def get_sl_amount_usd() -> float:
+    return _sl_amount_usd
+
+
+def get_sl_amount_usc() -> float:
+    return _sl_amount_usc
+
+
+def set_sl_amount_usd(value: float) -> None:
+    global _sl_amount_usd
+    if value <= 0:
+        raise ValueError("SL amount must be positive")
+    _sl_amount_usd = value
+
+
+def set_sl_amount_usc(value: float) -> None:
+    global _sl_amount_usc
+    if value <= 0:
+        raise ValueError("SL amount must be positive")
+    _sl_amount_usc = value

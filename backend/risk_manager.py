@@ -12,6 +12,7 @@ from loguru import logger
 
 from config import settings
 from backend.claude_analyst import SignalResult
+import backend.model_manager as _mm
 
 # ---------------------------------------------------------------------------
 # RISK-01  Types
@@ -126,9 +127,8 @@ def calc_position_size_fixed_sl(
 
     Returns (lot_size, actual_risk_amount, sl_distance).
     """
-    risk_cfg = settings.risk
     is_cent = account_currency.upper() == "USC"
-    sl_amount = float(risk_cfg.get("sl_amount_usc" if is_cent else "sl_amount_usd", 50.0))
+    sl_amount = _mm.get_sl_amount_usc() if is_cent else _mm.get_sl_amount_usd()
 
     sl_distance = abs(entry - sl)
     if sl_distance < 1e-8 or tick_size < 1e-10 or tick_value < 1e-10:
@@ -269,7 +269,7 @@ def evaluate(
             lot_step=float(tick_info.get("lot_step", 0.01)),
         )
         is_cent = state.currency.upper() == "USC"
-        sl_amount_cfg = float(settings.risk.get("sl_amount_usc" if is_cent else "sl_amount_usd", 50.0))
+        sl_amount_cfg = _mm.get_sl_amount_usc() if is_cent else _mm.get_sl_amount_usd()
         logger.info(
             f"Fixed-SL sizing: {signal.symbol} | "
             f"target_risk={sl_amount_cfg} {state.currency} | "

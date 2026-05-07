@@ -20,6 +20,7 @@ from backend.risk_manager import RiskDecision
 from backend.signal_logger import SignalStats
 from backend.model_manager import AVAILABLE_MODELS, AVAILABLE_STRATEGIES
 from backend.news_filter import NewsEvent, get_all_upcoming_events, refresh_cache_if_stale
+from backend import model_manager as _mm
 from config import settings
 
 # ---------------------------------------------------------------------------
@@ -156,6 +157,7 @@ class TelegramNotifier:
         self._app.add_handler(CommandHandler("strategy", self._cmd_strategy))
         self._app.add_handler(CommandHandler("settings", self._cmd_settings))
         self._app.add_handler(CommandHandler("news",     self._cmd_news))
+        self._app.add_handler(CommandHandler("sl",       self._cmd_sl))
         self._app.add_handler(CommandHandler("chatid",   self._cmd_chatid))
 
         # Channels — channel_post updates are NOT handled by CommandHandler,
@@ -183,6 +185,9 @@ class TelegramNotifier:
         self._app.add_handler(
             CallbackQueryHandler(self._cb_toggle_setting, pattern=r"^toggle_setting:")
         )
+        self._app.add_handler(
+            CallbackQueryHandler(self._cb_sl, pattern=r"^set_sl:")
+        )
         self._app.add_error_handler(self._error_handler)
 
         await self._app.initialize()
@@ -195,6 +200,7 @@ class TelegramNotifier:
             BotCommand("strategy", "Select rule-based strategy (when model=Strategy)"),
             BotCommand("settings", "Toggle auto-trade and multi-market scan ON/OFF"),
             BotCommand("news",     "Show upcoming high-impact news events (next 4h)"),
+            BotCommand("sl",       "View or set SL risk amount per trade"),
             BotCommand("chatid",   "Show this chat's ID (for setup/debug)"),
         ])
 
@@ -352,6 +358,7 @@ class TelegramNotifier:
             "strategy":  self._cmd_strategy,
             "settings":  self._cmd_settings,
             "news":      self._cmd_news,
+            "sl":        self._cmd_sl,
             "chatid":    self._cmd_chatid,
         }
         handler = routes.get(cmd)
@@ -605,6 +612,106 @@ class TelegramNotifier:
         await update.effective_message.reply_text(
             _format_news_schedule(events, now),
             parse_mode=ParseMode.HTML,
+        )
+
+    # ------------------------------------------------------------------
+    # /sl command + callback
+    # ------------------------------------------------------------------
+
+    async def _cmd_sl(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """View or set the SL risk amount per trade.
+        Usage: /sl               — show current + preset buttons
+               /sl 75            — set USD amount to $75
+               /sl usd 75        — set USD amount explicitly
+               /sl usc 1500      — set USC (cent) amount to 1500
+        """
+        if update.effective_message is None or not self._is_authorized(update):
+            return
+
+        args = context.args or []
+
+        # Parse inline arguments: /sl [usd|usc] <number>
+        if args:
+            try:
+                if len(args) == 1:
+                    value = float(args[0])
+                    _mm.set_sl_amount_usd(value)
+                    _mm.set_sl_amount_usc(value * 20)  # rough USC equiv (1 USD = 20 USC on cent)
+                    await update.effective_message.reply_text(
+                        f"✅ SL amount updated — USD: <b>${value:,.2f}</b>  USC: <b>{value * 20:,.0f}</b>",
+                        parse_mode="HTML",
+                    )
+                    return
+                elif len(args) == 2:
+                    account_type = args[0].lower()
+                    value = float(args[1])
+                    if account_type in ("usd", "standard"):
+                        _mm.set_sl_amount_usd(value)
+                        await update.effective_message.reply_text(
+                            f"✅ USD SL amount set to <b>${value:,.2f}</b> per trade.",
+                            parse_mode="HTML",
+                        )
+                    elif account_type in ("usc", "cent"):
+                        _mm.set_sl_amount_usc(value)
+                        await update.effective_message.reply_text(
+                            f"✅ USC SL amount set to <b>{value:,.0f} USC</b> per trade.",
+                            parse_mode="HTML",
+                        )
+                    else:
+                        raise ValueError(f"Unknown account type: {args[0]}")
+                    return
+            except ValueError as e:
+                await update.effective_message.reply_text(
+                    f"⚠️ Invalid input: {e}\n"
+                    f"Usage: <code>/sl 75</code>  or  <code>/sl usd 75</code>  or  <code>/sl usc 1500</code>",
+                    parse_mode="HTML",
+                )
+                return
+
+        # No args — show current values with preset buttons
+        await update.effective_message.reply_text(
+            _sl_status_text(),
+            parse_mode="HTML",
+            reply_markup=_build_sl_keyboard(),
+        )
+
+    async def _cb_sl(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle SL preset button taps."""
+        query = update.callback_query
+        if query is None:
+            return
+        if not self._is_authorized(update):
+            await query.answer()
+            return
+
+        # data format: set_sl:usd:75.0  or  set_sl:usc:1500.0
+        parts = query.data.split(":")
+        if len(parts) != 3:
+            await query.answer("Invalid data")
+            return
+
+        _, account_type, raw_value = parts
+        try:
+            value = float(raw_value)
+            if account_type == "usd":
+                _mm.set_sl_amount_usd(value)
+                label = f"${value:,.2f} USD"
+            else:
+                _mm.set_sl_amount_usc(value)
+                label = f"{value:,.0f} USC"
+        except ValueError as e:
+            await query.answer(f"Error: {e}", show_alert=True)
+            return
+
+        await query.answer(f"✅ SL set to {label}")
+        await query.edit_message_text(
+            _sl_status_text(),
+            parse_mode="HTML",
+            reply_markup=_build_sl_keyboard(),
         )
 
     async def _cb_toggle_setting(
@@ -912,6 +1019,36 @@ def _fmt_uptime(seconds: int) -> str:
     if h > 0:
         return f"{h}h {m}m"
     return f"{m}m"
+
+
+def _sl_status_text() -> str:
+    usd = _mm.get_sl_amount_usd()
+    usc = _mm.get_sl_amount_usc()
+    return (
+        f"💰 <b>SL Risk Amount per Trade</b>\n\n"
+        f"🏦 Standard (USD):  <b>${usd:,.2f}</b>\n"
+        f"🏦 Cent (USC):      <b>{usc:,.0f} USC</b>\n\n"
+        f"Tap a preset to change, or use:\n"
+        f"<code>/sl usd 75</code>   — set USD amount\n"
+        f"<code>/sl usc 1500</code> — set USC amount"
+    )
+
+
+def _build_sl_keyboard() -> InlineKeyboardMarkup:
+    usd_presets = [25, 50, 75, 100, 150, 200]
+    usc_presets = [500, 1000, 1500, 2000, 3000, 5000]
+
+    usd_row1 = [InlineKeyboardButton(f"${v}", callback_data=f"set_sl:usd:{float(v)}") for v in usd_presets[:3]]
+    usd_row2 = [InlineKeyboardButton(f"${v}", callback_data=f"set_sl:usd:{float(v)}") for v in usd_presets[3:]]
+    usc_row1 = [InlineKeyboardButton(f"{v}USC", callback_data=f"set_sl:usc:{float(v)}") for v in usc_presets[:3]]
+    usc_row2 = [InlineKeyboardButton(f"{v}USC", callback_data=f"set_sl:usc:{float(v)}") for v in usc_presets[3:]]
+
+    return InlineKeyboardMarkup([
+        usd_row1,
+        usd_row2,
+        usc_row1,
+        usc_row2,
+    ])
 
 
 def _format_news_schedule(events: list[NewsEvent], now: datetime) -> str:
