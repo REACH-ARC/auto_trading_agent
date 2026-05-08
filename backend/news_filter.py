@@ -266,3 +266,34 @@ async def check_and_refresh(symbol: str, dt: datetime | None = None) -> tuple[bo
     """
     await refresh_cache_if_stale()
     return is_news_blocked(symbol, dt)
+
+
+def get_news_context_for_agent(
+    symbol: str,
+    dt: datetime | None = None,
+    lookahead_minutes: int = 30,
+) -> list[NewsEvent]:
+    """
+    Return high-impact news events relevant to an AI agent cycle:
+    events currently in the blocking window OR releasing within the next lookahead_minutes.
+    Used to inject news awareness into the agent prompt instead of hard-blocking.
+    """
+    if dt is None:
+        dt = datetime.now(timezone.utc)
+
+    currencies = _currencies_for_symbol(symbol)
+    if not currencies:
+        return []
+
+    blocked_impacts: list[str] = settings.news_filter["impact_levels"]
+    window_end = dt + timedelta(minutes=lookahead_minutes)
+
+    return sorted(
+        [
+            e for e in _cache.events
+            if e.currency in currencies
+            and e.impact in blocked_impacts
+            and (e.is_blocking(dt) or dt <= e.event_time <= window_end)
+        ],
+        key=lambda e: e.event_time,
+    )

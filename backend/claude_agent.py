@@ -547,6 +547,7 @@ def _build_initial_prompt(
     symbol: str,
     account: AccountState,
     level_hits=None,
+    news_events=None,
 ) -> str:
     """Build the shared trigger prompt for both Claude and Ollama backends."""
     level_context = ""
@@ -566,10 +567,37 @@ def _build_initial_prompt(
             "key level is a high-quality confirmation signal."
         )
 
+    news_context = ""
+    if news_events:
+        now = datetime.now(timezone.utc)
+        lines = []
+        for e in news_events:
+            if e.is_blocking(now):
+                mins_since = int((now - e.event_time).total_seconds() / 60)
+                status = "ACTIVE — released" if mins_since >= 0 else "ACTIVE — imminent"
+            else:
+                mins_ahead = int((e.event_time - now).total_seconds() / 60)
+                status = f"in {mins_ahead} min"
+            lines.append(
+                f"  • [{e.impact}] {e.currency} '{e.title}' "
+                f"@ {e.event_time.strftime('%H:%M UTC')} ({status})"
+            )
+        news_context = (
+            "\n\n📰 NEWS ALERT — high-impact event(s) detected for this symbol:\n"
+            + "\n".join(lines)
+            + "\n\nYou are in AI agent mode. News events are TRADING OPPORTUNITIES — do NOT skip analysis.\n"
+            "- Analyse the price reaction: is there a clear directional move or reversal forming?\n"
+            "- Check if the news candle direction aligns with the technical trend (H4/D1).\n"
+            "- For news-driven entries, require confidence >= 75 (volatility demands higher conviction).\n"
+            "- Use a wider SL beyond the spike high/low to avoid premature stop-outs.\n"
+            "- If no clear directional bias yet, set NO_TRADE and explain what signal you are waiting for."
+        )
+
     return (
         f"New M15 bar closed — {symbol}\n"
         f"Time: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}"
-        f"{level_context}\n\n"
+        f"{level_context}"
+        f"{news_context}\n\n"
         f"Current account snapshot (cached — fetch fresh via get_account_info):\n"
         f"  Equity={account.equity:.2f}  Balance={account.balance:.2f}  "
         f"Open trades={account.open_trades}  Daily P&L={account.daily_pnl:+.2f}\n\n"
@@ -584,11 +612,12 @@ async def _run_agent_claude(
     max_iterations: int = 15,
     level_hits=None,
     auto_trade: bool = True,
+    news_events=None,
 ) -> AgentResult:
     """Claude (Anthropic) backend — uses tool_use blocks and prompt caching."""
     result = AgentResult(symbol=symbol)
     client = _get_client()
-    initial_prompt = _build_initial_prompt(symbol, account, level_hits)
+    initial_prompt = _build_initial_prompt(symbol, account, level_hits, news_events)
     system_prompt = _make_system_prompt(account.is_cent, auto_trade)
     active_tools = _get_tools(auto_trade)
 
@@ -681,6 +710,7 @@ async def run_agent(
     telegram_notifier=None,
     max_iterations: int = 15,
     level_hits=None,
+    news_events=None,
 ) -> AgentResult:
     """
     Run one full agent cycle triggered by a new M15 bar.
@@ -689,10 +719,13 @@ async def run_agent(
     """
     active     = model_manager.get_active_model()
     auto_trade = model_manager.get_auto_trade()
-    logger.info(f"run_agent — {symbol} model={active} auto_trade={auto_trade}")
+    logger.info(
+        f"run_agent — {symbol} model={active} auto_trade={auto_trade} "
+        f"news_events={len(news_events) if news_events else 0}"
+    )
 
     if active == "ollama":
-        initial_prompt = _build_initial_prompt(symbol, account, level_hits)
+        initial_prompt = _build_initial_prompt(symbol, account, level_hits, news_events)
         return await _run_agent_ollama(
             symbol=symbol,
             account=account,
@@ -710,4 +743,5 @@ async def run_agent(
         max_iterations=max_iterations,
         level_hits=level_hits,
         auto_trade=auto_trade,
+        news_events=news_events,
     )

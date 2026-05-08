@@ -563,7 +563,19 @@ async def _lifespan(app: FastAPI):
                 if active == "strategy":
                     await _run_strategy_cycle(ohlcv, account)
                 else:
-                    await run_agent(ohlcv.symbol, account, telegram_notifier=telegram, level_hits=level_hits)
+                    from backend.news_filter import refresh_cache_if_stale, get_news_context_for_agent
+                    await refresh_cache_if_stale()
+                    news_events = get_news_context_for_agent(ohlcv.symbol, ohlcv.received_at)
+                    if news_events:
+                        names = ", ".join(f"{e.currency} '{e.title}'" for e in news_events)
+                        logger.info(f"Agent cycle — news context injected for {ohlcv.symbol}: {names}")
+                    await run_agent(
+                        ohlcv.symbol,
+                        account,
+                        telegram_notifier=telegram,
+                        level_hits=level_hits,
+                        news_events=news_events or None,
+                    )
                 _state.signals_processed += 1
                 _state.last_signal_at = datetime.now(timezone.utc)
 
