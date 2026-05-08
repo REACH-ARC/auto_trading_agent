@@ -5,7 +5,7 @@ to all open positions, regardless of which mode placed them.
 Rules (configurable via settings.yaml):
   1. r_moved ≥ breakeven_at_r (1.0R) → SL → entry          (no-loss guarantee)
   2. r_moved ≥ tp1_rr_ratio   (1.5R) → SL → TP1 price      (lock TP1, ride to TP2)
-  3. r_moved ≥ tp2_rr_ratio   (2.5R) → SL → TP2 price      (lock TP2, ride to TP3)
+  3. r_moved ≥ tp2_rr_ratio   (2.0R) → SL → TP2 price      (lock TP2, ride to TP3)
 
 TP1/TP2 prices are computed from entry + direction × orig_sl_dist × rr_ratio so
 no extra per-ticket storage is needed beyond the original SL.

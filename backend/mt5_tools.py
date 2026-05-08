@@ -242,6 +242,15 @@ def place_order(
         if abs(price - sl) < min_distance:
             return {"error": f"SL too close to entry (min distance: {min_distance:.5f})"}
 
+        # Guard: max SL distance in pips (forex pairs only — skip for gold/crypto)
+        is_metal_or_crypto = any(x in symbol.upper() for x in ["XAU", "XAG", "BTC", "ETH", "LTC", "SOL"])
+        if not is_metal_or_crypto and sym_info.digits >= 3:
+            pip_value = sym_info.point * 10
+            sl_pips = abs(price - sl) / pip_value
+            max_sl_pips = int(risk_cfg.get("max_sl_pips", 100))
+            if sl_pips > max_sl_pips:
+                return {"error": f"SL too wide: {sl_pips:.0f} pips exceeds max {max_sl_pips} pips for {symbol}. Use tighter structure."}
+
         # Round lot to broker step
         step = sym_info.volume_step
         lot_size = round(round(lot_size / step) * step, 8)

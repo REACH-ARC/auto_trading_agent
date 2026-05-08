@@ -53,9 +53,10 @@ risk:
   max_daily_loss_percent: 3.0       # pause bot if daily loss hits 3%
   min_sl_atr_multiplier: 0.5
   max_sl_atr_multiplier: 3.0
-  tp1_rr_ratio: 1.5                 # TP1 at 1.5R
-  tp2_rr_ratio: 2.5                 # TP2 at 2.5R
-  tp3_rr_ratio: 4.0                 # TP3 at 4.0R
+  max_sl_pips: 200                  # hard SL cap for standard forex pairs (pips)
+  tp1_rr_ratio: 1.5                 # TP1 at 1.5R  → 150 pips at max SL
+  tp2_rr_ratio: 2.0                 # TP2 at 2.0R  → 200 pips at max SL
+  tp3_rr_ratio: 2.5                 # TP3 at 2.5R  → 250 pips at max SL
 
 news_filter:
   enabled: true

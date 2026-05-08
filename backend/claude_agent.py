@@ -83,7 +83,8 @@ Call send_update() with a summary covering:
 - Risk exactly the fixed SL amount per trade: 1 000 USC (cent) or $50 USD (standard) — never % of balance
 - Never exceed 3 open trades
 - Never trade when daily loss limit is breached
-- SL must always be structure-based, never a fixed pip value
+- SL must be structure-based AND within the hard cap: 200 pips (forex) / $60 (XAUUSD) / 3% (crypto)
+- Always provide tp1, tp2, and tp3 when calling place_order — never omit them
 - If a tool returns an error, log it and adapt — do not retry blindly
 """
 
@@ -92,7 +93,10 @@ NOTE: This is a **cent account** (USC). 100 USC = 1 USD. Account balance display
 
 - If confidence >= 65 AND no open position in the same direction for this symbol:
   a. Call get_symbol_info(symbol) to confirm tick value and lot constraints
-  b. Calculate lot_size using the FIXED SL amount (1 000 USC per trade — do NOT use % of balance):
+  b. SL CONSTRAINT — place SL at the nearest structural invalidation (swing high/low).
+     Target 100–200 pips for forex; $10–$60 for XAUUSD; 0.5–3% for crypto. Hard cap: 200 pips / $60 / 3%.
+     If structure is beyond the cap, skip this trade — return NO_TRADE.
+  c. Calculate lot_size using the FIXED SL amount (1 000 USC per trade — do NOT use % of balance):
        lot_size = 1000 / (SL_distance_in_price × tick_value / tick_size)
      Then scale by confidence:
        - confidence 65–74 → use 70% of calculated lots (cautious)
@@ -100,9 +104,12 @@ NOTE: This is a **cent account** (USC). 100 USC = 1 USD. Account balance display
        - confidence 85–94 → use 100% of calculated lots (confident)
        - confidence 95–100 → use 100% of calculated lots (high conviction)
      Clamp to broker min_lot and max_lot from get_symbol_info(). Round to broker lot_step.
-  c. Set SL at the nearest structural invalidation level (swing high/low)
-  d. Set TP1 = entry ± (SL_distance × 1.5) — this is the only TP; MT5 closes the full position here automatically
-  e. Call place_order() with order_type="MARKET" only — always enter at current price
+  d. Set all three TPs from entry:
+       TP1 = entry ± (SL_distance × 1.5)   — 150 pips at 100-pip SL
+       TP2 = entry ± (SL_distance × 2.0)   — 200 pips at 100-pip SL
+       TP3 = entry ± (SL_distance × 2.5)   — 250 pips at 100-pip SL
+  e. Call place_order() with order_type="MARKET", passing sl, tp1, tp2, and tp3.
+     MT5 hard-closes the position at TP3; the trade manager steps SL to TP1 then TP2 as each is hit.
 - If confidence < 65: NO_TRADE. Note what is missing."""
 
 _STEP4_STANDARD = """\
@@ -110,7 +117,10 @@ NOTE: This is a **standard account** (USD). Account balance is in real USD.
 
 - If confidence >= 65 AND no open position in the same direction for this symbol:
   a. Call get_symbol_info(symbol) to confirm tick value and lot constraints
-  b. Calculate lot_size using the FIXED SL amount ($50 USD per trade — do NOT use % of balance):
+  b. SL CONSTRAINT — place SL at the nearest structural invalidation (swing high/low).
+     Target 100–200 pips for forex; $10–$60 for XAUUSD; 0.5–3% for crypto. Hard cap: 200 pips / $60 / 3%.
+     If structure is beyond the cap, skip this trade — return NO_TRADE.
+  c. Calculate lot_size using the FIXED SL amount ($50 USD per trade — do NOT use % of balance):
        lot_size = 50 / (SL_distance_in_price × tick_value / tick_size)
      Then scale by confidence:
        - confidence 65–74 → use 70% of calculated lots (cautious)
@@ -118,9 +128,12 @@ NOTE: This is a **standard account** (USD). Account balance is in real USD.
        - confidence 85–94 → use 100% of calculated lots (full risk)
        - confidence 95–100 → use 100% of calculated lots (high conviction)
      Clamp to broker min_lot and max_lot from get_symbol_info(). Round to broker lot_step.
-  c. Set SL at the nearest structural invalidation level (swing high/low)
-  d. Set TP1 = entry ± (SL_distance × 1.5) — this is the only TP; MT5 closes the full position here automatically
-  e. Call place_order() with order_type="MARKET" only — always enter at current price
+  d. Set all three TPs from entry:
+       TP1 = entry ± (SL_distance × 1.5)   — 150 pips at 100-pip SL
+       TP2 = entry ± (SL_distance × 2.0)   — 200 pips at 100-pip SL
+       TP3 = entry ± (SL_distance × 2.5)   — 250 pips at 100-pip SL
+  e. Call place_order() with order_type="MARKET", passing sl, tp1, tp2, and tp3.
+     MT5 hard-closes the position at TP3; the trade manager steps SL to TP1 then TP2 as each is hit.
 - If confidence < 65: NO_TRADE. Note what is missing."""
 
 
@@ -163,7 +176,10 @@ def _make_system_prompt(is_cent: bool, auto_trade: bool = True, has_open_positio
             f"NOTE: This is a **cent account** (USC). 100 USC = 1 USD. Account balance displayed in USC.\n\n"
             f"- If confidence >= 65 AND no open position in the same direction for this symbol:\n"
             f"  a. Call get_symbol_info(symbol) to confirm tick value and lot constraints\n"
-            f"  b. Calculate lot_size using the FIXED SL amount ({sl_usc:,.0f} USC per trade"
+            f"  b. SL CONSTRAINT — place SL at the nearest structural invalidation (swing high/low).\n"
+            f"     Target 100–200 pips for forex; $10–$60 for XAUUSD; 0.5–3% for crypto. Hard cap: 200 pips / $60 / 3%.\n"
+            f"     If structure is beyond the cap, skip this trade — return NO_TRADE.\n"
+            f"  c. Calculate lot_size using the FIXED SL amount ({sl_usc:,.0f} USC per trade"
             f" — do NOT use % of balance):\n"
             f"       lot_size = {sl_usc:,.0f} / (SL_distance_in_price x tick_value / tick_size)\n"
             f"     Then scale by confidence:\n"
@@ -172,9 +188,12 @@ def _make_system_prompt(is_cent: bool, auto_trade: bool = True, has_open_positio
             f"       - confidence 85-94  -> use 100% of calculated lots (confident)\n"
             f"       - confidence 95-100 -> use 100% of calculated lots (high conviction)\n"
             f"     Clamp to broker min_lot and max_lot from get_symbol_info(). Round to broker lot_step.\n"
-            f"  c. Set SL at the nearest structural invalidation level (swing high/low)\n"
-            f"  d. Set TP1 = entry +/- (SL_distance x 1.5) — MT5 closes the full position here automatically\n"
-            f"  e. Call place_order() with order_type=\"MARKET\" only — always enter at current price\n"
+            f"  d. Set all three TPs from entry:\n"
+            f"       TP1 = entry +/- (SL_distance x 1.5)   — 150 pips at 100-pip SL\n"
+            f"       TP2 = entry +/- (SL_distance x 2.0)   — 200 pips at 100-pip SL\n"
+            f"       TP3 = entry +/- (SL_distance x 2.5)   — 250 pips at 100-pip SL\n"
+            f"  e. Call place_order() with order_type=\"MARKET\", passing sl, tp1, tp2, and tp3.\n"
+            f"     MT5 hard-closes at TP3; trade manager steps SL to TP1 then TP2 as each is hit.\n"
             f"- If confidence < 65: NO_TRADE. Note what is missing."
         )
     else:
@@ -182,7 +201,10 @@ def _make_system_prompt(is_cent: bool, auto_trade: bool = True, has_open_positio
             f"NOTE: This is a **standard account** (USD). Account balance is in real USD.\n\n"
             f"- If confidence >= 65 AND no open position in the same direction for this symbol:\n"
             f"  a. Call get_symbol_info(symbol) to confirm tick value and lot constraints\n"
-            f"  b. Calculate lot_size using the FIXED SL amount (${sl_usd:,.2f} USD per trade"
+            f"  b. SL CONSTRAINT — place SL at the nearest structural invalidation (swing high/low).\n"
+            f"     Target 100–200 pips for forex; $10–$60 for XAUUSD; 0.5–3% for crypto. Hard cap: 200 pips / $60 / 3%.\n"
+            f"     If structure is beyond the cap, skip this trade — return NO_TRADE.\n"
+            f"  c. Calculate lot_size using the FIXED SL amount (${sl_usd:,.2f} USD per trade"
             f" — do NOT use % of balance):\n"
             f"       lot_size = {sl_usd:,.2f} / (SL_distance_in_price x tick_value / tick_size)\n"
             f"     Then scale by confidence:\n"
@@ -191,9 +213,12 @@ def _make_system_prompt(is_cent: bool, auto_trade: bool = True, has_open_positio
             f"       - confidence 85-94  -> use 100% of calculated lots (full risk)\n"
             f"       - confidence 95-100 -> use 100% of calculated lots (high conviction)\n"
             f"     Clamp to broker min_lot and max_lot from get_symbol_info(). Round to broker lot_step.\n"
-            f"  c. Set SL at the nearest structural invalidation level (swing high/low)\n"
-            f"  d. Set TP1 = entry +/- (SL_distance x 1.5) — MT5 closes the full position here automatically\n"
-            f"  e. Call place_order() with order_type=\"MARKET\" only — always enter at current price\n"
+            f"  d. Set all three TPs from entry:\n"
+            f"       TP1 = entry +/- (SL_distance x 1.5)   — 150 pips at 100-pip SL\n"
+            f"       TP2 = entry +/- (SL_distance x 2.0)   — 200 pips at 100-pip SL\n"
+            f"       TP3 = entry +/- (SL_distance x 2.5)   — 250 pips at 100-pip SL\n"
+            f"  e. Call place_order() with order_type=\"MARKET\", passing sl, tp1, tp2, and tp3.\n"
+            f"     MT5 hard-closes at TP3; trade manager steps SL to TP1 then TP2 as each is hit.\n"
             f"- If confidence < 65: NO_TRADE. Note what is missing."
         )
 
@@ -274,7 +299,8 @@ _TOOLS = [
         "description": (
             "Place a BUY or SELL MARKET order on MT5 at the current price. "
             "Server-side guards enforce min/max lot size, max open trades, and daily loss limit. "
-            "SL must be structure-based. TP at 1.5R."
+            "SL must be structure-based and within the hard pip cap. "
+            "Always pass tp1, tp2, and tp3 — MT5 hard-closes at TP3, trade manager steps SL through TP1→TP2."
         ),
         "input_schema": {
             "type": "object",
@@ -282,11 +308,13 @@ _TOOLS = [
                 "symbol": {"type": "string"},
                 "direction": {"type": "string", "enum": ["BUY", "SELL"]},
                 "lot_size": {"type": "number", "description": "Position size in lots — calculated from fixed SL amount, clamped to broker min/max from get_symbol_info()"},
-                "sl": {"type": "number", "description": "Stop loss price (structure-based)"},
-                "tp1": {"type": "number", "description": "Take profit — MT5 closes full position here (1.5R)"},
+                "sl": {"type": "number", "description": "Stop loss price (structure-based, within hard pip cap)"},
+                "tp1": {"type": "number", "description": "Take profit 1 — 1.5R from entry (SL_distance × 1.5)"},
+                "tp2": {"type": "number", "description": "Take profit 2 — 2.0R from entry (SL_distance × 2.0)"},
+                "tp3": {"type": "number", "description": "Take profit 3 — 2.5R from entry (SL_distance × 2.5); MT5 closes here"},
                 "comment": {"type": "string", "description": "Trade label (max 31 chars)"},
             },
-            "required": ["symbol", "direction", "lot_size", "sl", "tp1"],
+            "required": ["symbol", "direction", "lot_size", "sl", "tp1", "tp2", "tp3"],
         },
     },
     {

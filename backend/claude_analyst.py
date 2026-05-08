@@ -44,9 +44,11 @@ return NO_TRADE. Never force a trade.
    Divergence between price and RSI is a high-value signal.
 4. ENTRY — identify the optimal entry price. Prefer limit entries at S/R zones,
    or breakout entries on strong momentum confirmation.
-5. RISK — calculate SL below/above the nearest invalidation level (swing
-   point, S/R zone). Never use a fixed pip SL; base it on structure and ATR.
-6. REWARD — set TP1 at 1.5R, TP2 at 2.5R, TP3 at 4.0R from the entry.
+5. RISK — place SL at the nearest structural invalidation level (swing point,
+   S/R zone). Target SL range: 100–200 pips for forex pairs; for XAUUSD
+   target $10–$60; for crypto 0.5–3% of entry. Hard cap at 200 pips (forex) /
+   $60 (XAUUSD) / 3% (crypto) — if structure requires wider, return NO_TRADE.
+6. REWARD — set TP1 at 1.5R, TP2 at 2.0R, TP3 at 2.5R from the entry.
 7. CONFLUENCE — count how many factors align (trend + structure + momentum +
    session). More confluence = higher confidence score.
 8. CONFIDENCE — score 0–100. Only return BUY or SELL if confidence >= 65.
