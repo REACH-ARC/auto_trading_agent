@@ -37,6 +37,7 @@ GetStrategyFn = Callable[[], str]
 SetStrategyFn = Callable[[str], None]
 GetBoolFn = Callable[[], bool]
 SetBoolFn = Callable[[bool], None]
+RunBacktestFn = Callable[[str, str, int], Awaitable[Any]]  # (symbol, strategy, days) → BacktestResult
 
 # Telegram HTML mode only allows these tags; everything else must be stripped.
 _TG_ALLOWED_TAGS: frozenset[str] = frozenset({
@@ -106,6 +107,7 @@ class TelegramNotifier:
         self._set_auto_trade: SetBoolFn | None = None
         self._get_scan_all: GetBoolFn | None = None
         self._set_scan_all: SetBoolFn | None = None
+        self._run_backtest: RunBacktestFn | None = None
 
         if not self._enabled:
             logger.info("Telegram notifications disabled (check settings.yaml + .env)")
@@ -130,6 +132,7 @@ class TelegramNotifier:
         set_auto_trade_fn: SetBoolFn | None = None,
         get_scan_all_fn: GetBoolFn | None = None,
         set_scan_all_fn: SetBoolFn | None = None,
+        run_backtest_fn: RunBacktestFn | None = None,
     ) -> None:
         """Initialise the bot and start polling for commands."""
         if not self._enabled:
@@ -147,18 +150,20 @@ class TelegramNotifier:
         self._set_auto_trade = set_auto_trade_fn
         self._get_scan_all = get_scan_all_fn
         self._set_scan_all = set_scan_all_fn
+        self._run_backtest = run_backtest_fn
 
         self._app = Application.builder().token(settings.telegram_bot_token).build()
 
         # Groups, supergroups, private chats
-        self._app.add_handler(CommandHandler("status",   self._cmd_status))
-        self._app.add_handler(CommandHandler("market",   self._cmd_market))
-        self._app.add_handler(CommandHandler("model",    self._cmd_model))
-        self._app.add_handler(CommandHandler("strategy", self._cmd_strategy))
-        self._app.add_handler(CommandHandler("settings", self._cmd_settings))
-        self._app.add_handler(CommandHandler("news",     self._cmd_news))
-        self._app.add_handler(CommandHandler("sl",       self._cmd_sl))
-        self._app.add_handler(CommandHandler("chatid",   self._cmd_chatid))
+        self._app.add_handler(CommandHandler("status",    self._cmd_status))
+        self._app.add_handler(CommandHandler("market",    self._cmd_market))
+        self._app.add_handler(CommandHandler("model",     self._cmd_model))
+        self._app.add_handler(CommandHandler("strategy",  self._cmd_strategy))
+        self._app.add_handler(CommandHandler("settings",  self._cmd_settings))
+        self._app.add_handler(CommandHandler("news",      self._cmd_news))
+        self._app.add_handler(CommandHandler("sl",        self._cmd_sl))
+        self._app.add_handler(CommandHandler("backtest",  self._cmd_backtest))
+        self._app.add_handler(CommandHandler("chatid",    self._cmd_chatid))
 
         # Channels — channel_post updates are NOT handled by CommandHandler,
         # so we route them manually through a MessageHandler
@@ -201,6 +206,7 @@ class TelegramNotifier:
             BotCommand("settings", "Toggle auto-trade and multi-market scan ON/OFF"),
             BotCommand("news",     "Show upcoming high-impact news events (next 4h)"),
             BotCommand("sl",       "View or set SL risk amount per trade"),
+            BotCommand("backtest", "Backtest active strategy. Usage: /backtest [days]"),
             BotCommand("chatid",   "Show this chat's ID (for setup/debug)"),
         ])
 
@@ -359,6 +365,7 @@ class TelegramNotifier:
             "settings":  self._cmd_settings,
             "news":      self._cmd_news,
             "sl":        self._cmd_sl,
+            "backtest":  self._cmd_backtest,
             "chatid":    self._cmd_chatid,
         }
         handler = routes.get(cmd)
@@ -712,6 +719,84 @@ class TelegramNotifier:
             _sl_status_text(),
             parse_mode="HTML",
             reply_markup=_build_sl_keyboard(),
+        )
+
+    # ------------------------------------------------------------------
+    # /backtest command
+    # ------------------------------------------------------------------
+
+    async def _cmd_backtest(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Run a walk-forward backtest and send results to Telegram.
+        Usage: /backtest              — current symbol, current strategy, 90 days
+               /backtest 30           — 30 days
+               /backtest XAUUSD 60    — symbol + days
+               /backtest XAUUSD amd_fvg 90  — symbol + strategy + days
+        """
+        import asyncio as _asyncio
+        if update.effective_message is None or not self._is_authorized(update):
+            return
+
+        if not self._run_backtest:
+            await update.effective_message.reply_text("⚠️ Backtest not available.")
+            return
+
+        # --- Parse args ---
+        args = context.args or []
+        symbol   = self._get_symbol() if self._get_symbol else "XAUUSD"
+        strategy = self._get_strategy() if self._get_strategy else "ema_pullback"
+        days     = 90
+
+        try:
+            if len(args) == 1:
+                days = int(args[0])
+            elif len(args) == 2:
+                symbol = args[0].upper()
+                days   = int(args[1])
+            elif len(args) >= 3:
+                symbol   = args[0].upper()
+                strategy = args[1].lower()
+                days     = int(args[2])
+        except (ValueError, IndexError):
+            await update.effective_message.reply_text(
+                "⚠️ Usage:\n"
+                "<code>/backtest</code> — current symbol/strategy, 90 days\n"
+                "<code>/backtest 30</code> — 30 days\n"
+                "<code>/backtest XAUUSD 60</code>\n"
+                "<code>/backtest XAUUSD amd_fvg 90</code>",
+                parse_mode=ParseMode.HTML,
+            )
+            return
+
+        days = max(7, min(365, days))
+        strategy_label = AVAILABLE_STRATEGIES.get(strategy, strategy)
+
+        # --- Send "running" placeholder ---
+        placeholder = await update.effective_message.reply_text(
+            f"⏳ <b>Backtest running…</b>\n\n"
+            f"Symbol:   <code>{symbol}</code>\n"
+            f"Strategy: <code>{strategy_label}</code>\n"
+            f"Period:   <b>{days} days</b>\n\n"
+            f"<i>MT5 must be open. This may take 30–120 seconds.</i>",
+            parse_mode=ParseMode.HTML,
+        )
+
+        # --- Run backtest in thread ---
+        try:
+            result = await self._run_backtest(symbol, strategy, days)
+        except Exception as e:
+            await placeholder.edit_text(
+                f"❌ <b>Backtest failed</b>\n<code>{html.escape(str(e))}</code>",
+                parse_mode=ParseMode.HTML,
+            )
+            logger.error(f"Telegram /backtest error: {e}")
+            return
+
+        # --- Format and send results ---
+        await placeholder.edit_text(
+            _format_backtest_result(result),
+            parse_mode=ParseMode.HTML,
         )
 
     async def _cb_toggle_setting(
@@ -1083,6 +1168,58 @@ def _format_news_warning(events: list[NewsEvent]) -> str:
         time_str = e.event_time.strftime("%H:%M UTC")
         lines.append(f"{impact_icon} <b>{e.currency}</b> — {html.escape(e.title)}  @ {time_str}")
     lines.append("\n<i>New trades will be paused during the block window.</i>")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Backtest result formatter
+# ---------------------------------------------------------------------------
+
+def _format_backtest_result(result: Any) -> str:
+    """Format a BacktestResult into a Telegram HTML message."""
+    strategy_label = AVAILABLE_STRATEGIES.get(result.strategy, result.strategy)
+    period = f"{result.period_start.strftime('%Y-%m-%d')} → {result.period_end.strftime('%Y-%m-%d')}"
+
+    pf_str = f"{result.profit_factor:.2f}" if result.profit_factor != float("inf") else "∞"
+    net_sign = "+" if result.net_pnl_r >= 0 else ""
+    pnl_icon = "📈" if result.net_pnl_r >= 0 else "📉"
+
+    breakevens = getattr(result, "breakevens", 0)
+
+    lines = [
+        f"📊 <b>Backtest Results</b>",
+        f"",
+        f"Symbol:    <code>{result.symbol}</code>",
+        f"Strategy:  <code>{strategy_label}</code>",
+        f"Period:    {period} ({(result.period_end - result.period_start).days}d)",
+        f"",
+        f"<b>── Trades ──</b>",
+        f"Total:     <b>{result.total_trades}</b>  "
+        f"(tested {result.bars_tested:,} bars)",
+        f"Wins:      <b>{result.wins}</b>",
+        f"Losses:    <b>{result.losses}</b>",
+        f"Breakeven: <b>{breakevens}</b>",
+        f"Open:      <b>{result.open_trades}</b>",
+        f"",
+        f"<b>── Performance ──</b>",
+        f"Win rate:  <b>{result.win_rate_pct:.1f}%</b>",
+        f"Profit F:  <b>{pf_str}</b>",
+        f"Net P&L:   {pnl_icon} <b>{net_sign}{result.net_pnl_r:.2f}R  /  ${result.net_pnl_usd:+.2f}</b>",
+        f"Max DD:    <b>{result.max_drawdown_pct:.1f}%</b>",
+        f"Balance:   ${result.initial_balance:,.0f} → <b>${result.final_balance:,.0f}</b>",
+        f"",
+        f"<b>── Quality ──</b>",
+        f"Avg bars held: <b>{result.avg_bars_held:.0f}</b> M15 bars",
+        f"Avg confidence: <b>{result.avg_confidence:.0f}%</b>",
+        f"No-trade bars:  <b>{result.no_trade_count:,}</b>",
+    ]
+
+    if result.sample_no_trade_reasons:
+        lines.append("")
+        lines.append("<b>── Sample NO_TRADE reasons ──</b>")
+        for r in result.sample_no_trade_reasons[:3]:
+            lines.append(f"<i>{html.escape(r[:100])}</i>")
+
     return "\n".join(lines)
 
 

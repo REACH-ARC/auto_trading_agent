@@ -28,6 +28,7 @@ AVAILABLE_STRATEGIES: dict[str, str] = {
     "ema_pullback":   "EMA Pullback",
     "asian_breakout": "Asian Range Breakout",
     "sr_bounce":      "S/R Bounce + RSI",
+    "amd_fvg":        "AMD + FVG (ICT)",
 }
 
 

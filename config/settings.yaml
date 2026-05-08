@@ -144,6 +144,10 @@ strategy:
     rsi_overbought: 70             # RSI threshold for bounce sell (tightened from 65)
     min_strength: 2                # minimum S/R touch count
     min_confidence: 65
+  amd_fvg:
+    sweep_lookback: 12             # H1 bars to scan back for liquidity sweep
+    ref_lookback: 15               # H1 bars before sweep to establish swing reference
+    min_confidence: 65
 
 logging:
   level: "INFO"

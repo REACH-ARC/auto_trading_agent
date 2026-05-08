@@ -486,6 +486,10 @@ async def _lifespan(app: FastAPI):
         _state.active_symbol = account_manager.strip_suffix(symbol)
         logger.info(f"Active trading symbol changed to {symbol}")
 
+    async def _tg_run_backtest(symbol: str, strategy: str, days: int):
+        cfg = BacktestConfig(symbol=symbol, strategy=strategy, days=days)
+        return await asyncio.to_thread(run_backtest, cfg)
+
     # Telegram bot
     await telegram.start(
         get_status_fn=health,
@@ -500,6 +504,7 @@ async def _lifespan(app: FastAPI):
         set_auto_trade_fn=model_manager.set_auto_trade,
         get_scan_all_fn=model_manager.get_scan_all_symbols,
         set_scan_all_fn=model_manager.set_scan_all_symbols,
+        run_backtest_fn=_tg_run_backtest,
     )
 
     # APScheduler — daily summary + multi-symbol scanner
@@ -776,7 +781,7 @@ async def trigger_scanner() -> dict:
 
 class BacktestRequest(BaseModel):
     symbol: str = ""                    # defaults to active symbol
-    strategy: str = "ema_pullback"      # ema_pullback | asian_breakout | sr_bounce
+    strategy: str = "ema_pullback"      # ema_pullback | asian_breakout | sr_bounce | amd_fvg
     days: int = 90                      # how many days of history to test
     initial_balance: float = 10_000.0
     risk_pct: float = 1.0

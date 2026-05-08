@@ -3,7 +3,8 @@ Walk-Forward Backtester — simulates any rule-based strategy on MT5 historical 
 
 Design principles:
   - Zero lookahead: at each M15 bar the strategy only sees bars up to that point.
-  - Binary outcome: first of SL or TP1 hit wins/loses (-1R or +tp1_rr R).
+  - Multi-TP trail: SL moves to entry after TP1, to TP1 after TP2, closes at TP3.
+    Outcomes: LOSS (-1R) | BREAKEVEN (0R) | WIN_TP1 (+1.5R) | WIN_FULL (+2.5R)
   - One trade at a time (max_open_trades=1 for clean P&L tracking).
   - All data fetched directly from the MT5 terminal (must be connected + logged in).
 """
@@ -50,10 +51,12 @@ class BacktestTrade:
     sl: float
     tp1: float
     confidence: int
-    outcome: Literal["WIN", "LOSS", "OPEN"]
+    outcome: Literal["WIN_FULL", "WIN_TP1", "BREAKEVEN", "LOSS", "OPEN"]
     bars_held: int
-    pnl_r: float                    # e.g. +1.5 or -1.0
+    pnl_r: float                    # e.g. +2.5, +1.5, 0.0, or -1.0
     pnl_usd: float
+    tp2: float | None = None
+    tp3: float | None = None
     reasoning: str = ""
 
 
@@ -64,8 +67,9 @@ class BacktestResult:
     period_start: datetime
     period_end: datetime
     total_trades: int
-    wins: int
+    wins: int           # WIN_FULL + WIN_TP1
     losses: int
+    breakevens: int
     open_trades: int
     win_rate_pct: float
     profit_factor: float
@@ -118,30 +122,29 @@ def _bars_up_to(bars: list[Bar], cutoff: datetime, n: int) -> list[Bar]:
 
 
 # ---------------------------------------------------------------------------
-# Outcome simulation
+# Outcome simulation — multi-TP trail
 # ---------------------------------------------------------------------------
 
-def _check_bar_outcome(
-    direction: str,
-    sl: float,
-    tp1: float,
-    bar: Bar,
-) -> Literal["WIN", "LOSS", "OPEN"]:
-    """
-    Check if a single bar closes the trade.
-    Conservative rule: if both SL and TP1 are within the bar range, SL wins.
-    """
-    if direction == "BUY":
-        sl_hit = bar.low  <= sl
-        tp_hit = bar.high >= tp1
-    else:
-        sl_hit = bar.high >= sl
-        tp_hit = bar.low  <= tp1
+def _bar_hits(bar: Bar, direction: str, level: float, side: str) -> bool:
+    """Check if a bar touches a level. side='sl' or 'tp'."""
+    if side == "sl":
+        return bar.low <= level if direction == "BUY" else bar.high >= level
+    return bar.high >= level if direction == "BUY" else bar.low <= level
 
+
+def _simulate_bar(
+    bar: Bar,
+    direction: str,
+    current_sl: float,
+    next_tp: float,
+) -> Literal["HIT_SL", "HIT_TP", "OPEN"]:
+    """Conservative: SL takes priority if both are within the bar range."""
+    sl_hit = _bar_hits(bar, direction, current_sl, "sl")
+    tp_hit = _bar_hits(bar, direction, next_tp,    "tp")
     if sl_hit:
-        return "LOSS"
+        return "HIT_SL"
     if tp_hit:
-        return "WIN"
+        return "HIT_TP"
     return "OPEN"
 
 
@@ -189,6 +192,8 @@ def run_backtest(config: BacktestConfig) -> BacktestResult:
         # Risk per trade in USD
         risk_usd_per_trade = config.initial_balance * config.risk_pct / 100.0
         tp1_rr = float(settings.risk.get("tp1_rr_ratio", 1.5))
+        tp2_rr = float(settings.risk.get("tp2_rr_ratio", 2.0))
+        tp3_rr = float(settings.risk.get("tp3_rr_ratio", 2.5))
 
         trades: list[BacktestTrade] = []
         balance   = config.initial_balance
@@ -197,6 +202,10 @@ def run_backtest(config: BacktestConfig) -> BacktestResult:
 
         open_trade: BacktestTrade | None = None
         open_trade_start_idx: int = 0
+        # Multi-TP trail state for the current open trade
+        trail_sl:    float = 0.0   # current (possibly moved) stop loss
+        trail_phase: int   = 0     # 0=to TP1, 1=to TP2 (SL at entry), 2=to TP3 (SL at TP1)
+
         bars_tested      = 0
         no_trade_count   = 0
         no_trade_reasons: list[str] = []   # sample first 5
@@ -211,26 +220,66 @@ def run_backtest(config: BacktestConfig) -> BacktestResult:
                 continue
 
             # ----------------------------------------------------------------
-            # 1. Check if open trade closed on this bar
+            # 1. Check if open trade closed on this bar (multi-TP trail)
             # ----------------------------------------------------------------
             if open_trade is not None:
-                outcome = _check_bar_outcome(
-                    open_trade.direction, open_trade.sl, open_trade.tp1, m15_bar
-                )
-                if outcome != "OPEN":
-                    bars_held = i - open_trade_start_idx
-                    if outcome == "WIN":
-                        pnl_r   = tp1_rr
-                        pnl_usd = risk_usd_per_trade * tp1_rr
-                    else:
-                        pnl_r   = -1.0
-                        pnl_usd = -risk_usd_per_trade
+                closed = False
+                pnl_r  = 0.0
 
-                    open_trade.outcome    = outcome
+                if trail_phase == 0:
+                    # Waiting for TP1 (full risk)
+                    result = _simulate_bar(m15_bar, open_trade.direction, trail_sl, open_trade.tp1)
+                    if result == "HIT_SL":
+                        pnl_r  = -1.0
+                        open_trade.outcome = "LOSS"
+                        closed = True
+                    elif result == "HIT_TP":
+                        # TP1 hit — move SL to entry, chase TP2
+                        trail_sl    = open_trade.entry
+                        trail_phase = 1
+                        if open_trade.tp2 is None:
+                            pnl_r = tp1_rr
+                            open_trade.outcome = "WIN_FULL"
+                            closed = True
+
+                elif trail_phase == 1:
+                    # Waiting for TP2 (SL at entry — breakeven guaranteed)
+                    tp2 = open_trade.tp2 or open_trade.tp1
+                    result = _simulate_bar(m15_bar, open_trade.direction, trail_sl, tp2)
+                    if result == "HIT_SL":
+                        pnl_r  = 0.0
+                        open_trade.outcome = "BREAKEVEN"
+                        closed = True
+                    elif result == "HIT_TP":
+                        # TP2 hit — move SL to TP1, chase TP3
+                        trail_sl    = open_trade.tp1
+                        trail_phase = 2
+                        if open_trade.tp3 is None:
+                            pnl_r = tp2_rr
+                            open_trade.outcome = "WIN_FULL"
+                            closed = True
+
+                elif trail_phase == 2:
+                    # Waiting for TP3 (SL at TP1 — +1.5R locked)
+                    tp3 = open_trade.tp3 or open_trade.tp2 or open_trade.tp1
+                    result = _simulate_bar(m15_bar, open_trade.direction, trail_sl, tp3)
+                    if result == "HIT_SL":
+                        pnl_r  = tp1_rr
+                        open_trade.outcome = "WIN_TP1"
+                        closed = True
+                    elif result == "HIT_TP":
+                        pnl_r  = tp3_rr
+                        open_trade.outcome = "WIN_FULL"
+                        closed = True
+
+                if closed:
+                    pnl_usd = risk_usd_per_trade * pnl_r
+                    bars_held = i - open_trade_start_idx
+
                     open_trade.close_time = bar_time
                     open_trade.bars_held  = bars_held
-                    open_trade.pnl_r      = pnl_r
-                    open_trade.pnl_usd    = pnl_usd
+                    open_trade.pnl_r      = round(pnl_r, 2)
+                    open_trade.pnl_usd    = round(pnl_usd, 2)
 
                     balance += pnl_usd
                     peak_bal = max(peak_bal, balance)
@@ -238,12 +287,13 @@ def run_backtest(config: BacktestConfig) -> BacktestResult:
                     max_dd = max(max_dd, dd)
 
                     logger.debug(
-                        f"Backtest trade closed: {open_trade.direction} {outcome} "
-                        f"R={pnl_r:+.1f} USD={pnl_usd:+.2f} bal={balance:.2f}"
+                        f"Backtest trade closed: {open_trade.direction} {open_trade.outcome} "
+                        f"R={pnl_r:+.2f} USD={pnl_usd:+.2f} bal={balance:.2f}"
                     )
                     trades.append(open_trade)
-                    open_trade = None
-                    # Stop early if max_trades reached
+                    open_trade   = None
+                    trail_sl     = 0.0
+                    trail_phase  = 0
                     if config.max_trades > 0 and len(trades) >= config.max_trades:
                         break
                 else:
@@ -297,6 +347,8 @@ def run_backtest(config: BacktestConfig) -> BacktestResult:
                 entry=signal.entry,
                 sl=signal.sl,
                 tp1=signal.tp1,
+                tp2=signal.tp2,
+                tp3=signal.tp3,
                 confidence=signal.confidence,
                 outcome="OPEN",
                 bars_held=0,
@@ -305,6 +357,8 @@ def run_backtest(config: BacktestConfig) -> BacktestResult:
                 reasoning=signal.reasoning[:120] if signal.reasoning else "",
             )
             open_trade_start_idx = i
+            trail_sl    = signal.sl
+            trail_phase = 0
             if config.max_trades > 0 and len(trades) >= config.max_trades:
                 break
             logger.debug(
@@ -325,13 +379,14 @@ def run_backtest(config: BacktestConfig) -> BacktestResult:
     # ----------------------------------------------------------------
     # Metrics
     # ----------------------------------------------------------------
-    closed  = [t for t in trades if t.outcome != "OPEN"]
-    wins    = [t for t in closed if t.outcome == "WIN"]
-    losses  = [t for t in closed if t.outcome == "LOSS"]
-    open_t  = [t for t in trades if t.outcome == "OPEN"]
+    closed     = [t for t in trades if t.outcome != "OPEN"]
+    wins       = [t for t in closed if t.outcome in ("WIN_FULL", "WIN_TP1")]
+    losses     = [t for t in closed if t.outcome == "LOSS"]
+    breakevens = [t for t in closed if t.outcome == "BREAKEVEN"]
+    open_t     = [t for t in trades if t.outcome == "OPEN"]
 
-    win_rate   = len(wins) / len(closed) * 100 if closed else 0.0
-    net_pnl_r  = sum(t.pnl_r  for t in closed)
+    win_rate    = len(wins) / len(closed) * 100 if closed else 0.0
+    net_pnl_r   = sum(t.pnl_r   for t in closed)
     net_pnl_usd = sum(t.pnl_usd for t in closed)
 
     gross_win  = sum(t.pnl_usd for t in wins)
@@ -363,6 +418,7 @@ def run_backtest(config: BacktestConfig) -> BacktestResult:
         total_trades=len(trades),
         wins=len(wins),
         losses=len(losses),
+        breakevens=len(breakevens),
         open_trades=len(open_t),
         win_rate_pct=round(win_rate, 1),
         profit_factor=pf,

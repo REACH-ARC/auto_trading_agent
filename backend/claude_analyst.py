@@ -169,6 +169,23 @@ def _fmt_patterns(patterns: PatternResult) -> list[str]:
                 f"    [{p.timeframe}] {p.name} — {p.direction} "
                 f"({p.confidence} confidence)  key level: {p.key_level}"
             )
+
+    if patterns.fvg_patterns:
+        active = [p for p in patterns.fvg_patterns if not p.mitigated]
+        mitig  = [p for p in patterns.fvg_patterns if p.mitigated]
+        lines.append("  Fair Value Gaps (FVG):")
+        for p in active:
+            lines.append(
+                f"    [{p.timeframe}] {p.direction} FVG "
+                f"zone {p.fvg_low}–{p.fvg_high}  mid={p.midpoint}  [ACTIVE]"
+            )
+        for p in mitig:
+            lines.append(
+                f"    [{p.timeframe}] {p.direction} FVG "
+                f"zone {p.fvg_low}–{p.fvg_high}  mid={p.midpoint}  [mitigated]"
+            )
+    else:
+        lines.append("  FVG: None detected")
     else:
         lines.append("  Chart: None detected on H4/D1")
 

@@ -26,6 +26,8 @@ def run_strategy(ohlcv: OHLCVData, indicators: IndicatorResult) -> SignalResult:
             from backend.strategies.asian_breakout import analyse  # type: ignore[no-redef]
         elif strategy == "sr_bounce":
             from backend.strategies.sr_bounce import analyse  # type: ignore[no-redef]
+        elif strategy == "amd_fvg":
+            from backend.strategies.amd_fvg import analyse  # type: ignore[no-redef]
         else:
             logger.warning(f"Strategy '{strategy}' not implemented — returning NO_TRADE")
             return _no_trade(ohlcv.symbol, f"Strategy '{strategy}' not implemented")

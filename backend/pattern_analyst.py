@@ -17,6 +17,7 @@ Confidence       = Literal["HIGH", "MEDIUM", "LOW"]
 
 _CANDLE_TFS = ["M15", "H1", "H4"]
 _CHART_TFS  = ["H4", "D1"]
+_FVG_TFS    = ["M15", "H1", "H4"]
 
 
 # ---------------------------------------------------------------------------
@@ -41,13 +42,25 @@ class ChartPattern:
 
 
 @dataclass
+class FVGPattern:
+    """Fair Value Gap — 3-candle imbalance zone (ICT concept)."""
+    timeframe:  str
+    direction:  PatternDirection   # BULLISH or BEARISH
+    fvg_high:   float              # upper boundary of the gap
+    fvg_low:    float              # lower boundary of the gap
+    midpoint:   float              # 50% level (equilibrium / optimal entry)
+    mitigated:  bool               # True if price has already passed through 50%+
+
+
+@dataclass
 class PatternResult:
     candle_patterns: list[CandlePattern] = field(default_factory=list)
     chart_patterns:  list[ChartPattern]  = field(default_factory=list)
+    fvg_patterns:    list[FVGPattern]    = field(default_factory=list)
 
     @property
     def has_patterns(self) -> bool:
-        return bool(self.candle_patterns or self.chart_patterns)
+        return bool(self.candle_patterns or self.chart_patterns or self.fvg_patterns)
 
 
 # ---------------------------------------------------------------------------
@@ -366,11 +379,64 @@ def _detect_chart_patterns(df: pd.DataFrame, tf: str) -> list[ChartPattern]:
 
 
 # ---------------------------------------------------------------------------
+# Fair Value Gap detection
+# ---------------------------------------------------------------------------
+
+def _detect_fvgs(df: pd.DataFrame, tf: str, lookback: int = 30) -> list[FVGPattern]:
+    """
+    Detect Fair Value Gaps (3-candle imbalance zones) in recent bars.
+
+    Bullish FVG : candle[i].high < candle[i+2].low  — gap above C1's high
+    Bearish FVG : candle[i].low  > candle[i+2].high — gap below C1's low
+    """
+    if len(df) < 3:
+        return []
+
+    patterns: list[FVGPattern] = []
+    current_price = float(df.iloc[-1]["close"])
+    recent = df.tail(lookback + 2)
+    n = len(recent)
+
+    for i in range(n - 2):
+        c1_high = float(recent.iloc[i]["high"])
+        c1_low  = float(recent.iloc[i]["low"])
+        c3_high = float(recent.iloc[i + 2]["high"])
+        c3_low  = float(recent.iloc[i + 2]["low"])
+
+        if c1_high < c3_low:
+            fvg_low  = c1_high
+            fvg_high = c3_low
+            mid = (fvg_low + fvg_high) / 2
+            # Mitigated once price retraces past the 50% level from above
+            patterns.append(FVGPattern(
+                timeframe=tf, direction="BULLISH",
+                fvg_high=round(fvg_high, 6), fvg_low=round(fvg_low, 6),
+                midpoint=round(mid, 6), mitigated=(current_price < mid),
+            ))
+
+        elif c1_low > c3_high:
+            fvg_high = c1_low
+            fvg_low  = c3_high
+            mid = (fvg_low + fvg_high) / 2
+            # Mitigated once price pushes past the 50% level from below
+            patterns.append(FVGPattern(
+                timeframe=tf, direction="BEARISH",
+                fvg_high=round(fvg_high, 6), fvg_low=round(fvg_low, 6),
+                midpoint=round(mid, 6), mitigated=(current_price > mid),
+            ))
+
+    # Return only the 3 most recent per direction (most relevant)
+    bullish = [p for p in patterns if p.direction == "BULLISH"][-3:]
+    bearish = [p for p in patterns if p.direction == "BEARISH"][-3:]
+    return bullish + bearish
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
 def detect_patterns(ohlcv: OHLCVData) -> PatternResult:
-    """Detect candlestick and chart patterns across all available timeframes."""
+    """Detect candlestick, chart, and FVG patterns across all available timeframes."""
     result = PatternResult()
 
     for tf in _CANDLE_TFS:
@@ -384,5 +450,11 @@ def detect_patterns(ohlcv: OHLCVData) -> PatternResult:
             continue
         df = ohlcv.to_df(tf)  # type: ignore[arg-type]
         result.chart_patterns.extend(_detect_chart_patterns(df, tf))
+
+    for tf in _FVG_TFS:
+        if tf not in ohlcv.timeframes:
+            continue
+        df = ohlcv.to_df(tf)  # type: ignore[arg-type]
+        result.fvg_patterns.extend(_detect_fvgs(df, tf))
 
     return result
