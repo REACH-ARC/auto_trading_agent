@@ -558,7 +558,13 @@ async def _lifespan(app: FastAPI):
     if settings.mt5_fetcher.get("enabled", False):
         use_agent = settings.mt5_fetcher.get("use_agent", True)
         if use_agent:
-            async def _agent_cycle(ohlcv: OHLCVData, account: AccountState, level_hits=None) -> None:
+            async def _agent_cycle(
+                ohlcv: OHLCVData,
+                account: AccountState,
+                level_hits=None,
+                alert_hits=None,
+                skip_analysis: bool = False,
+            ) -> None:
                 active = model_manager.get_active_model()
                 if active == "strategy":
                     await _run_strategy_cycle(ohlcv, account)
@@ -569,12 +575,16 @@ async def _lifespan(app: FastAPI):
                     if news_events:
                         names = ", ".join(f"{e.currency} '{e.title}'" for e in news_events)
                         logger.info(f"Agent cycle — news context injected for {ohlcv.symbol}: {names}")
+                    # News overrides skip_analysis — always run full cycle during news
+                    effective_skip = skip_analysis and not news_events
                     await run_agent(
                         ohlcv.symbol,
                         account,
                         telegram_notifier=telegram,
                         level_hits=level_hits,
                         news_events=news_events or None,
+                        alert_hits=alert_hits or None,
+                        skip_analysis=effective_skip,
                     )
                 _state.signals_processed += 1
                 _state.last_signal_at = datetime.now(timezone.utc)

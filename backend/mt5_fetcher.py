@@ -164,6 +164,7 @@ async def fetcher_loop(run_pipeline_fn, get_symbol_fn=None) -> None:
     """
     from backend.scanner import update_symbol_data
     from backend.level_watcher import LevelWatcher
+    from backend.agent_alert_manager import get_alert_manager
 
     from backend import account_manager
 
@@ -203,6 +204,7 @@ async def fetcher_loop(run_pipeline_fn, get_symbol_fn=None) -> None:
     last_bar: datetime | None = None
     last_symbol: str = initial_symbol
     watcher = LevelWatcher()
+    alert_mgr = get_alert_manager()
 
     try:
         while True:
@@ -222,12 +224,14 @@ async def fetcher_loop(run_pipeline_fn, get_symbol_fn=None) -> None:
                 else:
                     last_bar = None
                     watcher.clear_symbol(last_symbol)
+                    alert_mgr.clear(last_symbol)
                     last_symbol = symbol
 
-            # Check current price against watched levels every tick
+            # Check current price against watched S/R levels and agent alerts every tick
             price = await asyncio.to_thread(_current_price, symbol)
             if price is not None:
                 watcher.check_price(symbol, price)
+                alert_mgr.check_price(symbol, price)
 
             bar_time = await asyncio.to_thread(_current_m15_time, symbol)
             if bar_time is None:
@@ -240,12 +244,19 @@ async def fetcher_loop(run_pipeline_fn, get_symbol_fn=None) -> None:
             if bar_time == last_bar:
                 continue  # same bar — level monitoring continues above
 
-            # New M15 bar: collect all level hits from the candle that just closed
+            # New M15 bar: collect level hits and triggered agent alerts from the closed candle
             level_hits = watcher.pop_hits(symbol)
+            alert_hits = alert_mgr.pop_triggered(symbol)
+
             if level_hits:
                 logger.info(
                     f"MT5 fetcher: {len(level_hits)} level hit(s) from closed candle — "
                     f"{[f'{h.level_type} {h.level_price}' for h in level_hits]}"
+                )
+            if alert_hits:
+                logger.info(
+                    f"MT5 fetcher: {len(alert_hits)} agent alert(s) triggered — "
+                    f"{[f'{a.condition} {a.price:.5f}' for a in alert_hits]}"
                 )
 
             last_bar = bar_time
@@ -265,12 +276,30 @@ async def fetcher_loop(run_pipeline_fn, get_symbol_fn=None) -> None:
 
             account = await asyncio.to_thread(fetch_account)
 
+            # Skip full market analysis when a position is open and nothing notable happened.
+            # The agent will still run Steps 1+2+5 (position management) every bar.
+            skip_analysis = (
+                account.open_trades > 0
+                and not level_hits
+                and not alert_hits
+            )
+            if skip_analysis:
+                logger.debug(
+                    f"MT5 fetcher: skip_analysis=True for {symbol} "
+                    f"(open_trades={account.open_trades}, no level/alert hits)"
+                )
+
             # Keep scanner cache current
             await update_symbol_data(ohlcv)
 
-            # Run full analysis pipeline, passing level hit context for the agent
+            # Run full analysis pipeline, passing level hit and alert context for the agent
             try:
-                await run_pipeline_fn(ohlcv, account, level_hits=level_hits)
+                await run_pipeline_fn(
+                    ohlcv, account,
+                    level_hits=level_hits,
+                    alert_hits=alert_hits,
+                    skip_analysis=skip_analysis,
+                )
             except Exception as exc:
                 logger.error(f"MT5 fetcher: pipeline error — {exc}")
 

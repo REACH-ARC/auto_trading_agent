@@ -133,8 +133,28 @@ In your send_update(), include the trade you WOULD have placed:
 direction, entry, SL, TP, lot size, and reason — so the trader can decide manually.
 """
 
+_PRICE_ALERT_INSTRUCTIONS = """
 
-def _make_system_prompt(is_cent: bool, auto_trade: bool = True) -> str:
+## Price alerts — smarter position monitoring
+After any cycle where you have an open position, call set_price_alert() to register
+the key levels you want to watch between bar closes. When price crosses one of these
+levels, a full agent cycle fires at the next bar close with your hint as context.
+This replaces blind 15-min polling with targeted, event-driven analysis.
+
+Set 2–4 alerts per open position. Good candidates:
+  - Just inside your SL buffer (to catch near-misses early)
+  - At key S/R that would break your bias
+  - Near TP1 (to decide whether to let it run or lock in)
+
+Example: SL at 2650.00 → set_price_alert(symbol, 2655.00, "below",
+  "Price close to SL — check if invalidation structure broken, consider early exit")
+
+Always call clear_price_alerts() before setting a new batch so stale levels don't pile up.
+If no position is open, do NOT set alerts — they are for monitoring live trades only.
+"""
+
+
+def _make_system_prompt(is_cent: bool, auto_trade: bool = True, has_open_positions: bool = False) -> str:
     sl_usc = model_manager.get_sl_amount_usc()
     sl_usd = model_manager.get_sl_amount_usd()
 
@@ -180,6 +200,8 @@ def _make_system_prompt(is_cent: bool, auto_trade: bool = True) -> str:
     prompt = _SYSTEM_PROMPT_TEMPLATE.replace("<<STEP4>>", step4)
     if not auto_trade:
         prompt += _ALERT_ONLY_SUFFIX
+    if has_open_positions:
+        prompt += _PRICE_ALERT_INSTRUCTIONS
     return prompt
 
 
@@ -322,6 +344,50 @@ _TOOLS = [
             "required": ["message", "message_type"],
         },
     },
+    {
+        "name": "set_price_alert",
+        "description": (
+            "Register a price level for the bot to monitor between bar closes. "
+            "When price crosses this level, a full agent cycle fires at the next bar close "
+            "with your hint as context — so you only do deep analysis when something you flagged happens. "
+            "Use this after opening a position to watch for SL proximity, TP approach, or key S/R breaks. "
+            "Set 2–4 alerts max. Always call clear_price_alerts() first to remove stale levels."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "symbol": {"type": "string", "description": "Trading symbol, e.g. XAUUSDc"},
+                "price": {"type": "number", "description": "The price level to watch"},
+                "condition": {
+                    "type": "string",
+                    "enum": ["above", "below"],
+                    "description": "Trigger when price moves above or below this level",
+                },
+                "hint": {
+                    "type": "string",
+                    "description": (
+                        "What to analyse when this alert fires — e.g. "
+                        "'SL proximity — check if structure broken for early exit'"
+                    ),
+                },
+            },
+            "required": ["symbol", "price", "condition", "hint"],
+        },
+    },
+    {
+        "name": "clear_price_alerts",
+        "description": (
+            "Remove all active price alerts for a symbol. "
+            "Call this before setting a new batch of alerts so stale levels don't accumulate."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "symbol": {"type": "string"},
+            },
+            "required": ["symbol"],
+        },
+    },
 ]
 
 # ---------------------------------------------------------------------------
@@ -413,6 +479,19 @@ def _dispatch_tool(name: str, tool_input: dict) -> dict:
         return tools.modify_position(**tool_input)
     if name == "close_position":
         return tools.close_position(**tool_input)
+    if name == "set_price_alert":
+        from backend.agent_alert_manager import get_alert_manager
+        get_alert_manager().set_alert(
+            tool_input["symbol"],
+            float(tool_input["price"]),
+            tool_input["condition"],
+            tool_input.get("hint", ""),
+        )
+        return {"success": True, "alert": f"{tool_input['condition']} {tool_input['price']:.5f}"}
+    if name == "clear_price_alerts":
+        from backend.agent_alert_manager import get_alert_manager
+        get_alert_manager().clear(tool_input["symbol"])
+        return {"success": True}
     return {"error": f"Unknown tool: {name}"}
 
 
@@ -548,6 +627,8 @@ def _build_initial_prompt(
     account: AccountState,
     level_hits=None,
     news_events=None,
+    alert_hits=None,
+    skip_analysis: bool = False,
 ) -> str:
     """Build the shared trigger prompt for both Claude and Ollama backends."""
     level_context = ""
@@ -593,15 +674,39 @@ def _build_initial_prompt(
             "- If no clear directional bias yet, set NO_TRADE and explain what signal you are waiting for."
         )
 
+    alert_context = ""
+    if alert_hits:
+        lines = []
+        for a in alert_hits:
+            lines.append(
+                f"  • {a.condition.upper()} {a.price:.5f} — \"{a.hint}\""
+            )
+        alert_context = (
+            "\n\n🔔 PRICE ALERT TRIGGERED — your registered alert(s) fired on this bar:\n"
+            + "\n".join(lines)
+            + "\nRun your full 5-step decision loop. Use your hint above to guide Step 3 analysis."
+        )
+
+    cycle_instruction = "Run your full decision loop now."
+    if skip_analysis and not alert_hits and not level_hits and not news_events:
+        cycle_instruction = (
+            "⏭ POSITION MANAGEMENT ONLY — no level alerts or price alerts triggered.\n"
+            "Skip Step 3 (market analysis) and Step 4 (new entries) — they are not needed this bar.\n"
+            "Run Steps 1, 2, and 5 only.\n"
+            "In Step 5, briefly note your open position status and what you are watching.\n"
+            "Update your set_price_alert() levels if your plan has changed."
+        )
+
     return (
         f"New M15 bar closed — {symbol}\n"
         f"Time: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}"
         f"{level_context}"
-        f"{news_context}\n\n"
+        f"{news_context}"
+        f"{alert_context}\n\n"
         f"Current account snapshot (cached — fetch fresh via get_account_info):\n"
         f"  Equity={account.equity:.2f}  Balance={account.balance:.2f}  "
         f"Open trades={account.open_trades}  Daily P&L={account.daily_pnl:+.2f}\n\n"
-        f"Run your full decision loop now."
+        f"{cycle_instruction}"
     )
 
 
@@ -613,12 +718,17 @@ async def _run_agent_claude(
     level_hits=None,
     auto_trade: bool = True,
     news_events=None,
+    alert_hits=None,
+    skip_analysis: bool = False,
 ) -> AgentResult:
     """Claude (Anthropic) backend — uses tool_use blocks and prompt caching."""
     result = AgentResult(symbol=symbol)
     client = _get_client()
-    initial_prompt = _build_initial_prompt(symbol, account, level_hits, news_events)
-    system_prompt = _make_system_prompt(account.is_cent, auto_trade)
+    has_positions = account.open_trades > 0
+    initial_prompt = _build_initial_prompt(
+        symbol, account, level_hits, news_events, alert_hits, skip_analysis
+    )
+    system_prompt = _make_system_prompt(account.is_cent, auto_trade, has_positions)
     active_tools = _get_tools(auto_trade)
 
     messages: list[dict] = [{"role": "user", "content": initial_prompt}]
@@ -711,6 +821,8 @@ async def run_agent(
     max_iterations: int = 15,
     level_hits=None,
     news_events=None,
+    alert_hits=None,
+    skip_analysis: bool = False,
 ) -> AgentResult:
     """
     Run one full agent cycle triggered by a new M15 bar.
@@ -721,11 +833,15 @@ async def run_agent(
     auto_trade = model_manager.get_auto_trade()
     logger.info(
         f"run_agent — {symbol} model={active} auto_trade={auto_trade} "
-        f"news_events={len(news_events) if news_events else 0}"
+        f"news={len(news_events) if news_events else 0} "
+        f"alerts={len(alert_hits) if alert_hits else 0} "
+        f"skip_analysis={skip_analysis}"
     )
 
     if active == "ollama":
-        initial_prompt = _build_initial_prompt(symbol, account, level_hits, news_events)
+        initial_prompt = _build_initial_prompt(
+            symbol, account, level_hits, news_events, alert_hits, skip_analysis
+        )
         return await _run_agent_ollama(
             symbol=symbol,
             account=account,
@@ -744,4 +860,6 @@ async def run_agent(
         level_hits=level_hits,
         auto_trade=auto_trade,
         news_events=news_events,
+        alert_hits=alert_hits,
+        skip_analysis=skip_analysis,
     )
