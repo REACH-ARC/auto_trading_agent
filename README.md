@@ -50,8 +50,8 @@ python -m venv .venv
 
 # Windows
 .venv\Scripts\activate
-
 # Linux / macOS
+
 source .venv/bin/activate
 
 # Install dependencies

@@ -1,10 +1,10 @@
 """
-Level Watcher — monitors price against key S/R levels between M15 bar closes.
+Level Watcher — monitors price against key S/R levels between M5 bar closes.
 
 Workflow (Option 3):
-  1. update_levels()  called each M15 close with fresh S/R from indicators
+  1. update_levels()  called each M5 close with fresh S/R from indicators
   2. check_price()    called every ~30 s; records new hits without triggering entry
-  3. pop_hits()       called at the NEXT M15 close; returns hits, clears the store
+  3. pop_hits()       called at the NEXT M5 close; returns hits, clears the store
 
 Entry only happens at candle close — level hits provide richer context to Claude,
 not an immediate trigger. This avoids wick fakeouts while preserving level awareness.
@@ -41,7 +41,7 @@ class LevelWatcher:
         self._hits: dict[str, list[LevelHit]] = {}
 
     def update_levels(self, symbol: str, levels: list[SRLevel]) -> None:
-        """Replace watched levels for symbol. Called once per M15 close."""
+        """Replace watched levels for symbol. Called once per M5 close."""
         self._levels[symbol] = levels
         logger.debug(f"LevelWatcher [{symbol}]: watching {len(levels)} S/R levels")
 
@@ -83,7 +83,7 @@ class LevelWatcher:
     def pop_hits(self, symbol: str) -> list[LevelHit]:
         """
         Return all hits recorded during the last candle and clear the store.
-        Call this at M15 bar close before running the agent.
+        Call this at M5 bar close before running the agent.
         """
         return self._hits.pop(symbol, [])
 

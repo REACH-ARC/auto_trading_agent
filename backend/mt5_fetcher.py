@@ -1,7 +1,7 @@
 """
 MT5 Direct Fetcher — replaces the desktop EA.
 Connects to a running MT5 terminal via the MetaTrader5 Python package,
-detects each new M15 bar, fetches OHLCV + account state, and runs the pipeline.
+detects each new M5 bar, fetches OHLCV + account state, and runs the pipeline.
 
 Requirements:
   - MT5 terminal open on the same Windows PC (minimized is fine)
@@ -19,13 +19,13 @@ from config import settings
 from backend.indicators import Bar, OHLCVData
 from backend.risk_manager import AccountState
 
-_TF_NAMES = ["M15", "H1", "H4", "D1"]
+_TF_NAMES = ["M5", "H1", "H4", "D1"]
 
 
 def _tf_const(name: str):
     import MetaTrader5 as mt5
     return {
-        "M15": mt5.TIMEFRAME_M15,
+        "M5": mt5.TIMEFRAME_M5,
         "H1":  mt5.TIMEFRAME_H1,
         "H4":  mt5.TIMEFRAME_H4,
         "D1":  mt5.TIMEFRAME_D1,
@@ -71,7 +71,7 @@ def disconnect() -> None:
 
 
 def fetch_ohlcv(symbol: str, bars: int = 100) -> OHLCVData | None:
-    """Fetch M15/H1/H4/D1 bars for symbol from the MT5 terminal."""
+    """Fetch M5/H1/H4/D1 bars for symbol from the MT5 terminal."""
     import MetaTrader5 as mt5
 
     timeframes: dict = {}
@@ -130,12 +130,12 @@ def _ensure_symbol(symbol: str) -> bool:
     return True
 
 
-def _current_m15_time(symbol: str) -> datetime | None:
-    """Return the open timestamp of the current M15 bar."""
+def _current_m5_time(symbol: str) -> datetime | None:
+    """Return the open timestamp of the current M5 bar."""
     import MetaTrader5 as mt5
-    rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M15, 0, 1)
+    rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M5, 0, 1)
     if rates is None or len(rates) == 0:
-        logger.debug(f"MT5: copy_rates_from_pos({symbol}, M15) returned nothing — {mt5.last_error()}")
+        logger.debug(f"MT5: copy_rates_from_pos({symbol}, M5) returned nothing — {mt5.last_error()}")
         return None
     return datetime.fromtimestamp(rates[0]["time"], tz=timezone.utc)
 
@@ -151,7 +151,7 @@ def _current_price(symbol: str) -> float | None:
 
 async def fetcher_loop(run_pipeline_fn, get_symbol_fn=None) -> None:
     """
-    Background coroutine — checks every 30s for a new M15 bar.
+    Background coroutine — checks every 30s for a new M5 bar.
     On a new bar: fetch data → run pipeline → Claude → Telegram.
 
     Between bar closes the loop monitors price against S/R levels (Option 3).
@@ -233,10 +233,10 @@ async def fetcher_loop(run_pipeline_fn, get_symbol_fn=None) -> None:
                 watcher.check_price(symbol, price)
                 alert_mgr.check_price(symbol, price)
 
-            bar_time = await asyncio.to_thread(_current_m15_time, symbol)
+            bar_time = await asyncio.to_thread(_current_m5_time, symbol)
             if bar_time is None:
                 logger.warning(
-                    f"MT5 fetcher: cannot read M15 bar for {symbol} — "
+                    f"MT5 fetcher: cannot read M5 bar for {symbol} — "
                     "market may be closed, or symbol dropped from Market Watch"
                 )
                 continue
@@ -244,7 +244,7 @@ async def fetcher_loop(run_pipeline_fn, get_symbol_fn=None) -> None:
             if bar_time == last_bar:
                 continue  # same bar — level monitoring continues above
 
-            # New M15 bar: collect level hits and triggered agent alerts from the closed candle
+            # New M5 bar: collect level hits and triggered agent alerts from the closed candle
             level_hits = watcher.pop_hits(symbol)
             alert_hits = alert_mgr.pop_triggered(symbol)
 
@@ -260,7 +260,7 @@ async def fetcher_loop(run_pipeline_fn, get_symbol_fn=None) -> None:
                 )
 
             last_bar = bar_time
-            logger.info(f"MT5 fetcher: new M15 bar {bar_time.strftime('%H:%M UTC')} — fetching {symbol}")
+            logger.info(f"MT5 fetcher: new M5 bar {bar_time.strftime('%H:%M UTC')} — fetching {symbol}")
 
             ohlcv = await asyncio.to_thread(fetch_ohlcv, symbol, bars)
             if ohlcv is None:

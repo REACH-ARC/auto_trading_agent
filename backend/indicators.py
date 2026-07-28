@@ -13,7 +13,7 @@ from config import settings
 # IND-01  Data types
 # ---------------------------------------------------------------------------
 
-Timeframe = Literal["M15", "H1", "H4", "D1"]
+Timeframe = Literal["M5", "H1", "H4", "D1"]
 Direction = Literal["BUY", "SELL", "NEUTRAL"]
 
 
@@ -31,7 +31,7 @@ class Bar:
 class OHLCVData:
     """Multi-timeframe OHLCV payload received from MT5."""
     symbol: str
-    timeframes: dict[Timeframe, list[Bar]]  # e.g. {"M15": [...], "H1": [...]}
+    timeframes: dict[Timeframe, list[Bar]]  # e.g. {"M5": [...], "H1": [...]}
     received_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     def to_df(self, tf: Timeframe) -> pd.DataFrame:
@@ -73,6 +73,10 @@ class IndicatorResult:
     support_resistance: list[SRLevel]
     session: SessionInfo
     trend_bias: Direction                 # derived from EMA alignment on H4
+    ema_distance_atr: dict[Timeframe, float]
+    session_highs: dict[str, float]
+    session_lows: dict[str, float]
+    rvol: dict[Timeframe, float]
 
 
 # ---------------------------------------------------------------------------
@@ -146,8 +150,19 @@ def calc_atr(df: pd.DataFrame, period: int | None = None) -> float:
 
 
 # ---------------------------------------------------------------------------
-# IND-05  EMA
+# IND-05  EMA & RVOL
 # ---------------------------------------------------------------------------
+
+def calc_rvol(df: pd.DataFrame, period: int = 20) -> float:
+    if len(df) < period:
+        return 1.0
+    vol = df["volume"]
+    current_vol = float(vol.iloc[-1])
+    avg_vol = float(vol.rolling(window=period).mean().iloc[-1])
+    if avg_vol == 0:
+        return 1.0
+    return round(current_vol / avg_vol, 2)
+
 
 def calc_emas(df: pd.DataFrame) -> dict[int, float]:
     periods: list[int] = settings.indicators["ema_periods"]
@@ -280,6 +295,7 @@ def compute_indicators(data: OHLCVData) -> IndicatorResult:
     macd_all: dict[Timeframe, dict] = {}
     atr: dict[Timeframe, float] = {}
     ema_all: dict[Timeframe, dict[int, float]] = {}
+    rvol: dict[Timeframe, float] = {}
     dfs: dict[Timeframe, pd.DataFrame] = {}
 
     for tf in tfs:
@@ -289,6 +305,35 @@ def compute_indicators(data: OHLCVData) -> IndicatorResult:
         macd_all[tf] = calc_macd(df)
         atr[tf] = calc_atr(df)
         ema_all[tf] = calc_emas(df)
+        rvol[tf] = calc_rvol(df)
+
+    ema_distance_atr: dict[Timeframe, float] = {}
+    for tf in tfs:
+        close_price = dfs[tf]["close"].iloc[-1]
+        e20 = ema_all[tf].get(20)
+        a_val = atr[tf]
+        if e20 and a_val > 0:
+            ema_distance_atr[tf] = round((close_price - e20) / a_val, 2)
+        else:
+            ema_distance_atr[tf] = 0.0
+
+    session_highs: dict[str, float] = {}
+    session_lows: dict[str, float] = {}
+    
+    if "M5" in dfs:
+        m5_df = dfs["M5"]
+        # Daily high/low (current UTC day)
+        current_day = data.received_at.date()
+        daily_bars = m5_df[m5_df.index.date == current_day]
+        if not daily_bars.empty:
+            session_highs["Daily"] = float(daily_bars["high"].max())
+            session_lows["Daily"] = float(daily_bars["low"].min())
+        
+        # Asian session (00:00 to 09:00 UTC today)
+        asian_bars = daily_bars[(daily_bars.index.hour >= 0) & (daily_bars.index.hour < 9)]
+        if not asian_bars.empty:
+            session_highs["Asian"] = float(asian_bars["high"].max())
+            session_lows["Asian"] = float(asian_bars["low"].min())
 
     # S/R from H4 (best balance of noise vs significance) — reuse cached df
     sr_tf: Timeframe = "H4" if "H4" in tfs else tfs[-1]
@@ -310,4 +355,8 @@ def compute_indicators(data: OHLCVData) -> IndicatorResult:
         support_resistance=sr_levels,
         session=session,
         trend_bias=trend_bias,
+        ema_distance_atr=ema_distance_atr,
+        session_highs=session_highs,
+        session_lows=session_lows,
+        rvol=rvol,
     )

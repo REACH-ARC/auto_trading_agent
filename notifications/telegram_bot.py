@@ -17,7 +17,7 @@ from telegram.ext import Application, CallbackQueryHandler, CommandHandler, Cont
 
 from backend.claude_analyst import SignalResult
 from backend.risk_manager import RiskDecision
-from backend.signal_logger import SignalStats
+from backend.signal_logger import SignalStats, get_stats, reset_history
 from backend.model_manager import AVAILABLE_MODELS, AVAILABLE_STRATEGIES
 from backend.news_filter import NewsEvent, get_all_upcoming_events, refresh_cache_if_stale
 from backend import model_manager as _mm
@@ -164,6 +164,12 @@ class TelegramNotifier:
         self._app.add_handler(CommandHandler("sl",        self._cmd_sl))
         self._app.add_handler(CommandHandler("backtest",  self._cmd_backtest))
         self._app.add_handler(CommandHandler("chatid",    self._cmd_chatid))
+        self._app.add_handler(CommandHandler("help",      self._cmd_help))
+        self._app.add_handler(CommandHandler("history",   self._cmd_history))
+        self._app.add_handler(CommandHandler("today",     self._cmd_today))
+        self._app.add_handler(CommandHandler("week",      self._cmd_week))
+        self._app.add_handler(CommandHandler("month",     self._cmd_month))
+        self._app.add_handler(CommandHandler("reset_history", self._cmd_reset_history))
 
         # Channels — channel_post updates are NOT handled by CommandHandler,
         # so we route them manually through a MessageHandler
@@ -201,13 +207,14 @@ class TelegramNotifier:
         await self._app.bot.set_my_commands([
             BotCommand("status",   "Bot status and active market"),
             BotCommand("market",   "Select trading symbol"),
-            BotCommand("model",    "Switch AI model (Claude / Ollama / Strategy)"),
+            BotCommand("model",    "Switch AI model (Multi / Claude / Ollama / Strategy)"),
             BotCommand("strategy", "Select rule-based strategy (when model=Strategy)"),
             BotCommand("settings", "Toggle auto-trade and multi-market scan ON/OFF"),
             BotCommand("news",     "Show upcoming high-impact news events (next 4h)"),
             BotCommand("sl",       "View or set SL risk amount per trade"),
             BotCommand("backtest", "Backtest active strategy. Usage: /backtest [days]"),
             BotCommand("chatid",   "Show this chat's ID (for setup/debug)"),
+            BotCommand("help",     "Show all available commands"),
         ])
 
         await self._app.start()
@@ -367,10 +374,76 @@ class TelegramNotifier:
             "sl":        self._cmd_sl,
             "backtest":  self._cmd_backtest,
             "chatid":    self._cmd_chatid,
+            "help":      self._cmd_help,
+            "history":   self._cmd_history,
+            "today":     self._cmd_today,
+            "week":      self._cmd_week,
+            "month":     self._cmd_month,
+            "reset_history": self._cmd_reset_history,
         }
         handler = routes.get(cmd)
         if handler:
             await handler(update, context)
+
+    # -----------------------------------------------------------------------
+    # Trade History Commands
+    # -----------------------------------------------------------------------
+
+    async def _get_stats_message(self, since: datetime | None, title: str) -> str:
+        stats = await get_stats(since=since)
+        if stats.total_signals == 0:
+            return f"<b>{title}</b>\n\nNo trades recorded in this period."
+        
+        msg = f"<b>{title}</b>\n\n"
+        msg += f"Total Signals: {stats.total_signals} ({stats.actionable_signals} Actionable)\n"
+        msg += f"Win Rate: {stats.win_rate_pct}%\n"
+        msg += f"Wins: {stats.wins} | Losses: {stats.losses} | BE: {stats.breakevens}\n"
+        msg += f"Average R:R: {stats.avg_rr:.2f}R\n"
+        msg += f"Total P&L: <b>${stats.total_pnl:.2f}</b>\n"
+        msg += f"API Cost: ${stats.total_api_cost_usd:.4f}\n\n"
+        
+        if stats.by_symbol:
+            msg += "<b>By Symbol:</b>\n"
+            for sym, s in stats.by_symbol.items():
+                pnl = s.get('total_pnl', 0.0)
+                msg += f"• {_symbol_icon(sym)} {sym}: ${pnl:.2f}\n"
+
+        return msg
+
+    async def _cmd_history(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if update.effective_message is None or not self._is_authorized(update): return
+        msg = await self._get_stats_message(None, "📊 All-Time Trade History")
+        await update.effective_message.reply_html(msg)
+
+    async def _cmd_today(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if update.effective_message is None or not self._is_authorized(update): return
+        now = datetime.now(timezone.utc)
+        start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        msg = await self._get_stats_message(start_of_day, "📅 Today's Trades")
+        await update.effective_message.reply_html(msg)
+
+    async def _cmd_week(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if update.effective_message is None or not self._is_authorized(update): return
+        import datetime as dt
+        now = datetime.now(timezone.utc)
+        start_of_week = (now - dt.timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+        msg = await self._get_stats_message(start_of_week, "📅 This Week's Trades")
+        await update.effective_message.reply_html(msg)
+
+    async def _cmd_month(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if update.effective_message is None or not self._is_authorized(update): return
+        now = datetime.now(timezone.utc)
+        start_of_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        msg = await self._get_stats_message(start_of_month, "📅 This Month's Trades")
+        await update.effective_message.reply_html(msg)
+
+    async def _cmd_reset_history(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if update.effective_message is None or not self._is_authorized(update): return
+        success = await reset_history()
+        if success:
+            await update.effective_message.reply_text("✅ Trade history has been completely reset!")
+        else:
+            await update.effective_message.reply_text("❌ Failed to reset trade history. Check logs.")
 
     async def _cmd_chatid(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -391,6 +464,32 @@ class TelegramNotifier:
             f"If not matched, set <code>TELEGRAM_CHAT_ID={chat_id}</code> in .env and restart.",
             parse_mode=ParseMode.HTML,
         )
+
+    async def _cmd_help(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Show all available commands."""
+        chat_id = update.effective_chat.id if update.effective_chat else "unknown"
+        logger.info(f"Telegram: /help received from chat_id={chat_id}")
+
+        if update.effective_message is None or not self._is_authorized(update):
+            logger.warning(f"Telegram: /help rejected — not authorized (chat={chat_id})")
+            return
+
+        help_text = (
+            "🤖 <b>Available Commands</b>\n\n"
+            "<b>/status</b> - Bot status and active market\n"
+            "<b>/market</b> - Select trading symbol\n"
+            "<b>/model</b> - Switch AI model (Multi / Claude / Ollama / Strategy)\n"
+            "<b>/strategy</b> - Select rule-based strategy (when model=Strategy)\n"
+            "<b>/settings</b> - Toggle auto-trade and multi-market scan ON/OFF\n"
+            "<b>/news</b> - Show upcoming high-impact news events (next 4h)\n"
+            "<b>/sl</b> - View or set SL risk amount per trade\n"
+            "<b>/backtest</b> - Backtest active strategy. Usage: /backtest [days]\n"
+            "<b>/chatid</b> - Show this chat's ID (for setup/debug)\n"
+            "<b>/help</b> - Show all available commands\n"
+        )
+        await update.effective_message.reply_text(help_text, parse_mode=ParseMode.HTML)
 
     async def _cmd_market(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -883,7 +982,7 @@ class TelegramNotifier:
     def _build_model_keyboard(self, active_model: str) -> InlineKeyboardMarkup:
         """Build inline keyboard from available models."""
         buttons: list[InlineKeyboardButton] = []
-        icons = {"claude": "🔵", "ollama": "🟢", "strategy": "📐"}
+        icons = {"claude": "🔵", "ollama": "🟢", "multi_agent": "🧠", "strategy": "📐"}
         for key, display in AVAILABLE_MODELS.items():
             icon = icons.get(key, "⚪")
             label = f"✅ {icon} {display}" if key == active_model else f"{icon} {display}"
@@ -1065,7 +1164,7 @@ def _format_status(
 
     _model = active_model or "ollama"
     model_display = AVAILABLE_MODELS.get(_model, _model)
-    model_icons = {"claude": "🔵", "ollama": "🟢", "strategy": "📐"}
+    model_icons = {"claude": "🔵", "ollama": "🟢", "multi_agent": "🧠", "strategy": "📐"}
     model_icon = model_icons.get(_model, "⚪")
     model_line = f"{model_icon} Mode:              <b>{model_display}</b>\n"
 

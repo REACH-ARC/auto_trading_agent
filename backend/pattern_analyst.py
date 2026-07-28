@@ -15,9 +15,9 @@ PatternDirection = Literal["BULLISH", "BEARISH", "NEUTRAL"]
 PatternStrength  = Literal["STRONG", "MODERATE", "WEAK"]
 Confidence       = Literal["HIGH", "MEDIUM", "LOW"]
 
-_CANDLE_TFS = ["M15", "H1", "H4"]
+_CANDLE_TFS = ["M5", "H1", "H4"]
 _CHART_TFS  = ["H4", "D1"]
-_FVG_TFS    = ["M15", "H1", "H4"]
+_FVG_TFS    = ["M5", "H1", "H4"]
 
 
 # ---------------------------------------------------------------------------

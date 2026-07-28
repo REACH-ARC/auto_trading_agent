@@ -2,7 +2,7 @@
 Walk-Forward Backtester — simulates any rule-based strategy on MT5 historical data.
 
 Design principles:
-  - Zero lookahead: at each M15 bar the strategy only sees bars up to that point.
+  - Zero lookahead: at each M5 bar the strategy only sees bars up to that point.
   - Multi-TP trail: SL moves to entry after TP1, to TP1 after TP2, closes at TP3.
     Outcomes: LOSS (-1R) | BREAKEVEN (0R) | WIN_TP1 (+1.5R) | WIN_FULL (+2.5R)
   - One trade at a time (max_open_trades=1 for clean P&L tracking).
@@ -21,9 +21,9 @@ from backend.strategy_engine import run_strategy
 from backend import model_manager
 from config import settings
 
-_TF_NAMES = ["M15", "H1", "H4", "D1"]
+_TF_NAMES = ["M5", "H1", "H4", "D1"]
 
-# Minimum M15 bars needed before indicators are reliable (EMA200 warmup)
+# Minimum M5 bars needed before indicators are reliable (EMA200 warmup)
 _WARMUP_BARS = 220
 
 
@@ -93,7 +93,7 @@ class BacktestResult:
 def _fetch_rates(symbol: str, tf_name: str, date_from: datetime, date_to: datetime) -> list[Bar]:
     import MetaTrader5 as mt5
     tf_map = {
-        "M15": mt5.TIMEFRAME_M15,
+        "M5": mt5.TIMEFRAME_M5,
         "H1":  mt5.TIMEFRAME_H1,
         "H4":  mt5.TIMEFRAME_H4,
         "D1":  mt5.TIMEFRAME_D1,
@@ -184,10 +184,10 @@ def run_backtest(config: BacktestConfig) -> BacktestResult:
             all_bars[tf] = _fetch_rates(config.symbol, tf, date_from_fetch, date_end)
             logger.info(f"Backtest: fetched {len(all_bars[tf])} {tf} bars")
 
-        if not all_bars.get("M15"):
-            raise RuntimeError(f"No M15 data returned for {config.symbol}")
+        if not all_bars.get("M5"):
+            raise RuntimeError(f"No M5 data returned for {config.symbol}")
 
-        m15_bars = all_bars["M15"]
+        m5_bars = all_bars["M5"]
 
         # Risk per trade in USD
         risk_usd_per_trade = config.initial_balance * config.risk_pct / 100.0
@@ -210,8 +210,8 @@ def run_backtest(config: BacktestConfig) -> BacktestResult:
         no_trade_count   = 0
         no_trade_reasons: list[str] = []   # sample first 5
 
-        for i, m15_bar in enumerate(m15_bars):
-            bar_time = m15_bar.time
+        for i, m5_bar in enumerate(m5_bars):
+            bar_time = m5_bar.time
 
             # Skip warmup period
             if i < _WARMUP_BARS:
@@ -228,7 +228,7 @@ def run_backtest(config: BacktestConfig) -> BacktestResult:
 
                 if trail_phase == 0:
                     # Waiting for TP1 (full risk)
-                    result = _simulate_bar(m15_bar, open_trade.direction, trail_sl, open_trade.tp1)
+                    result = _simulate_bar(m5_bar, open_trade.direction, trail_sl, open_trade.tp1)
                     if result == "HIT_SL":
                         pnl_r  = -1.0
                         open_trade.outcome = "LOSS"
@@ -245,7 +245,7 @@ def run_backtest(config: BacktestConfig) -> BacktestResult:
                 elif trail_phase == 1:
                     # Waiting for TP2 (SL at entry — breakeven guaranteed)
                     tp2 = open_trade.tp2 or open_trade.tp1
-                    result = _simulate_bar(m15_bar, open_trade.direction, trail_sl, tp2)
+                    result = _simulate_bar(m5_bar, open_trade.direction, trail_sl, tp2)
                     if result == "HIT_SL":
                         pnl_r  = 0.0
                         open_trade.outcome = "BREAKEVEN"
@@ -262,7 +262,7 @@ def run_backtest(config: BacktestConfig) -> BacktestResult:
                 elif trail_phase == 2:
                     # Waiting for TP3 (SL at TP1 — +1.5R locked)
                     tp3 = open_trade.tp3 or open_trade.tp2 or open_trade.tp1
-                    result = _simulate_bar(m15_bar, open_trade.direction, trail_sl, tp3)
+                    result = _simulate_bar(m5_bar, open_trade.direction, trail_sl, tp3)
                     if result == "HIT_SL":
                         pnl_r  = tp1_rr
                         open_trade.outcome = "WIN_TP1"
@@ -309,7 +309,7 @@ def run_backtest(config: BacktestConfig) -> BacktestResult:
                 if sliced:
                     timeframes[tf] = sliced
 
-            if "M15" not in timeframes or len(timeframes["M15"]) < 20:
+            if "M5" not in timeframes or len(timeframes["M5"]) < 20:
                 continue
 
             ohlcv = OHLCVData(
@@ -370,7 +370,7 @@ def run_backtest(config: BacktestConfig) -> BacktestResult:
         # Mark any still-open trade at end of test
         if open_trade is not None:
             open_trade.outcome = "OPEN"
-            open_trade.bars_held = len(m15_bars) - open_trade_start_idx
+            open_trade.bars_held = len(m5_bars) - open_trade_start_idx
             trades.append(open_trade)
 
     finally:

@@ -235,6 +235,13 @@ def evaluate(
             reasons=["Signal is NO_TRADE — no risk evaluation needed"],
         )
 
+    min_confidence = settings.risk.get("min_confidence", 80)
+    if signal.confidence < min_confidence:
+        return RiskDecision(
+            approved=False, lot_size=0.0, risk_amount=0.0, sl_distance=0.0,
+            reasons=[f"Signal confidence ({signal.confidence}%) is below minimum threshold ({min_confidence}%)"],
+        )
+
     reasons: list[str] = []
     warnings: list[str] = []
     blocked = False

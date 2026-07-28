@@ -24,6 +24,7 @@ def _load_yaml() -> dict:
 class Settings(BaseSettings):
     # Secrets from .env
     anthropic_api_key: str = Field(..., alias="ANTHROPIC_API_KEY")
+    deepseek_api_key: str = Field("", alias="DEEPSEEK_API_KEY")
     telegram_bot_token: str = Field("", alias="TELEGRAM_BOT_TOKEN")
     telegram_chat_id: str = Field("", alias="TELEGRAM_CHAT_ID")
     telegram_signal_channel_id: str = Field("", alias="TELEGRAM_SIGNAL_CHANNEL_ID")
@@ -43,6 +44,10 @@ class Settings(BaseSettings):
     @property
     def claude(self) -> dict:
         return self._yaml["claude"]
+
+    @property
+    def deepseek(self) -> dict:
+        return self._yaml.get("deepseek", {})
 
     @property
     def ollama(self) -> dict:

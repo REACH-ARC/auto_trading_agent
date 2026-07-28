@@ -869,7 +869,7 @@ class SignalRequest(BaseModel):
     balance: float = 10_000.0
     open_trades: int = 0
     daily_pnl: float = 0.0
-    bars_m15: list[dict] = []
+    bars_m5: list[dict] = []
     bars_h1:  list[dict] = []
     bars_h4:  list[dict] = []
     bars_d1:  list[dict] = []
@@ -894,7 +894,7 @@ def _bars_to_ohlcv(symbol: str, req: SignalRequest) -> OHLCVData:
         return result
 
     timeframes = {}
-    for tf, bars in [("M15", req.bars_m15), ("H1", req.bars_h1),
+    for tf, bars in [("M5", req.bars_m5), ("H1", req.bars_h1),
                      ("H4", req.bars_h4), ("D1", req.bars_d1)]:
         parsed = _parse(bars)
         if parsed:

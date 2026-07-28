@@ -45,7 +45,9 @@ async def trade_manager_loop() -> None:
 
 
 def _manage_all_positions() -> None:
-    from backend.mt5_tools import get_open_positions, modify_position
+    from backend.mt5_tools import get_open_positions, modify_position, close_position
+    import re
+    import time
 
     cfg        = settings._yaml.get("trade_manager", {})
     be_r: float  = float(cfg.get("breakeven_at_r", 1.0))
@@ -73,6 +75,21 @@ def _manage_all_positions() -> None:
         cur_sl        = float(pos.get("sl") or 0.0)
         current_price = float(pos["current_price"])
         symbol        = pos["symbol"]
+        comment       = pos.get("comment", "")
+        time_setup    = pos.get("time_setup", 0)
+
+        # -------------------------------------------------------------
+        # Time Stop Check
+        # -------------------------------------------------------------
+        if comment:
+            match = re.search(r'expr:(\d+)h', comment)
+            if match and time_setup > 0:
+                expr_hours = int(match.group(1))
+                age_seconds = time.time() - time_setup
+                if age_seconds > expr_hours * 3600:
+                    logger.info(f"Time Stop triggered for ticket {ticket} ({age_seconds/3600:.1f}h > {expr_hours}h). Closing position.")
+                    close_position(ticket)
+                    continue
 
         if cur_sl == 0.0:
             continue  # position has no SL — skip

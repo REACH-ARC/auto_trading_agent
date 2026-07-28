@@ -65,15 +65,30 @@ def analyse(ohlcv: OHLCVData, indicators: IndicatorResult) -> SignalResult:
         direction = "BUY"
     elif bear_stack:
         direction = "SELL"
-    elif bull_ema200:
-        direction = "BUY"
-    elif bear_ema200:
-        direction = "SELL"
     else:
-        return _no_trade(symbol, "H4 EMA alignment unclear — no directional bias")
+        return _no_trade(
+            symbol,
+            "H4 EMA not fully stacked (need EMA20 > EMA50 > EMA200 or reverse) — "
+            "partial EMA200-only bias rejected"
+        )
 
     # ------------------------------------------------------------------ #
-    # 2. Entry trigger — price near H1 EMA20
+    # 2. D1 trend alignment — required hard filter
+    # ------------------------------------------------------------------ #
+    d1_emas   = indicators.ema.get("D1", {})
+    d1_ema200 = d1_emas.get(200, current_price)
+    d1_aligned = (direction == "BUY" and current_price > d1_ema200) or \
+                 (direction == "SELL" and current_price < d1_ema200)
+
+    if not d1_aligned:
+        return _no_trade(
+            symbol,
+            f"D1 EMA200 ({d1_ema200:.3f}) not aligned with {direction} — "
+            f"price={current_price:.3f} trading against daily trend"
+        )
+
+    # ------------------------------------------------------------------ #
+    # 3. Entry trigger — price near H1 EMA20
     # ------------------------------------------------------------------ #
     h1_emas  = indicators.ema.get(entry_tf, {})
     h1_ema20 = h1_emas.get(20, current_price)
@@ -83,7 +98,7 @@ def analyse(ohlcv: OHLCVData, indicators: IndicatorResult) -> SignalResult:
     near_ema20 = distance_to_ema20 <= prox_atr * h1_atr
 
     # ------------------------------------------------------------------ #
-    # 3. RSI filter
+    # 4. RSI filter
     # ------------------------------------------------------------------ #
     h1_rsi = indicators.rsi.get(entry_tf, 50.0)
     if direction == "BUY":
@@ -92,44 +107,37 @@ def analyse(ohlcv: OHLCVData, indicators: IndicatorResult) -> SignalResult:
         rsi_ok = 35 <= h1_rsi <= rsi_max
 
     # ------------------------------------------------------------------ #
-    # 4. Candle confirmation — M15 bar must close in trade direction
+    # 5. Candle confirmation — M15 bar must close in trade direction
     # ------------------------------------------------------------------ #
     candle_bullish = current_bar.close > current_bar.open
     candle_ok = (direction == "BUY" and candle_bullish) or \
                 (direction == "SELL" and not candle_bullish)
 
     # ------------------------------------------------------------------ #
-    # 5. MACD H1 alignment
+    # 6. MACD H1 alignment
     # ------------------------------------------------------------------ #
     h1_macd = indicators.macd.get(entry_tf, {})
     macd_bull = h1_macd.get("is_bullish", False)
     macd_aligned = (direction == "BUY" and macd_bull) or (direction == "SELL" and not macd_bull)
 
     # ------------------------------------------------------------------ #
-    # 6. Session
+    # 7. Session
     # ------------------------------------------------------------------ #
     session_active = indicators.session.is_high_liquidity
 
     # ------------------------------------------------------------------ #
-    # 7. D1 alignment
-    # ------------------------------------------------------------------ #
-    d1_emas   = indicators.ema.get("D1", {})
-    d1_ema200 = d1_emas.get(200, current_price)
-    d1_aligned = (direction == "BUY" and current_price > d1_ema200) or \
-                 (direction == "SELL" and current_price < d1_ema200)
-
-    # ------------------------------------------------------------------ #
-    # Confidence score — required checks first
+    # Confidence score
     # ------------------------------------------------------------------ #
     confidence = 0
     confluence: list[str] = []
 
-    if bull_stack or bear_stack:
-        confidence += 25
-        confluence.append(f"H4 EMA full stack {'bullish' if direction == 'BUY' else 'bearish'}")
-    elif bull_ema200 or bear_ema200:
-        confidence += 15
-        confluence.append(f"H4 EMA200 {'bullish' if direction == 'BUY' else 'bearish'} bias")
+    # H4 full stack is now required — always +25 at this point
+    confidence += 25
+    confluence.append(f"H4 EMA full stack {'bullish' if direction == 'BUY' else 'bearish'}")
+
+    # D1 alignment is now required — always +15 at this point
+    confidence += 15
+    confluence.append(f"D1 EMA200 ({d1_ema200:.3f}) confirms {direction} bias")
 
     if near_ema20:
         confidence += 20
@@ -166,10 +174,6 @@ def analyse(ohlcv: OHLCVData, indicators: IndicatorResult) -> SignalResult:
     if session_active:
         confidence += 10
         confluence.append(f"High-liquidity session active: {', '.join(indicators.session.active_sessions)}")
-
-    if d1_aligned:
-        confidence += 15
-        confluence.append("D1 EMA200 supports direction")
 
     confidence = min(confidence, 100)
 

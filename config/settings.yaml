@@ -7,9 +7,13 @@ claude:
   confidence_threshold: 70          # skip signals below this %
   cache_system_prompt: true
 
+deepseek:
+  base_url: "https://api.deepseek.com"
+  model: "deepseek-v4-pro"
+
 ollama:
   base_url: "http://localhost:11434/v1"
-  model: "gpt-oss:120b-cloud"    # model pulled in Ollama (free/local)
+  model: "gpt-oss:120b-cloud"    # model pulled in Ollama (free/local/cloud)
 
 server:
   host: "127.0.0.1"
@@ -28,13 +32,14 @@ symbols:
     - "GBPUSD"        # GBP/USD  (forex)
     - "USDJPY"        # USD/JPY  (forex)
   default_timeframes:
-    - "M15"
+    - "M5"
     - "H1"
     - "H4"
     - "D1"
   bars_per_timeframe: 100
 
 risk:
+  min_confidence: 80                # minimum confidence % required to execute auto trades
   # Lot sizing mode — choose one:
   #   use_fixed_sl_amount: true  → lot size calculated so SL = exact dollar amount
   #   use_fixed_sl_amount: false → lot size calculated as % of equity (account_risk_percent)
@@ -73,8 +78,9 @@ mt5_fetcher:
   enabled: true
   use_agent: true                   # true = full agent mode, false = signal-only analyst
   symbol: "XAUUSD"                   # base symbol — suffix added automatically at runtime
+  dxy_symbol: "DXY"                  # US Dollar Index ticker for correlation (set to "" to disable)
   bars_per_tf: 100
-  check_interval_sec: 30            # how often to poll for a new M15 bar
+  check_interval_sec: 30            # how often to poll for a new M5 bar
 
 scanner:
   enabled: false                    # disabled — mt5_fetcher handles data collection
@@ -130,7 +136,7 @@ strategy:
     rsi_min: 40                    # RSI must be above this for BUY entry
     rsi_max: 60                    # RSI must be below this for SELL entry
     sl_atr_buffer: 1.5             # SL = EMA20 ± (sl_atr_buffer × ATR)
-    ema_proximity_atr: 0.8         # price must be within N×ATR of EMA20
+    ema_proximity_atr: 0.5         # price must be within N×ATR of EMA20
     min_confidence: 65             # skip signals below this
   asian_breakout:
     session_start_utc: "00:00"
@@ -145,8 +151,10 @@ strategy:
     min_strength: 2                # minimum S/R touch count
     min_confidence: 65
   amd_fvg:
-    sweep_lookback: 12             # H1 bars to scan back for liquidity sweep
-    ref_lookback: 15               # H1 bars before sweep to establish swing reference
+    sweep_lookback: 20             # H1 bars to scan back for liquidity sweep
+    ref_lookback: 6                # H1 bars before sweep bar that define the accumulation range (session ≈ 5-8 H1 bars)
+    sweep_max_age: 12              # reject sweep older than N H1 bars (stale setup)
+    min_fvg_atr: 0.15              # FVG must be at least N × H1 ATR (filters tiny gaps)
     min_confidence: 65
 
 logging:

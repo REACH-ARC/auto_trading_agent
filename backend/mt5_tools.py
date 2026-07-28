@@ -78,6 +78,7 @@ def get_open_positions(symbol: str | None = None) -> dict:
                 "tp": p.tp,
                 "profit_usd": round(p.profit, 2),
                 "r_moved": r_moved,
+                "time_setup": p.time,
                 "open_time": datetime.fromtimestamp(p.time, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
                 "comment": p.comment,
             })
@@ -97,6 +98,8 @@ def get_market_snapshot(symbol: str) -> dict:
         from backend.indicators import compute_indicators
         from backend.claude_analyst import format_market_snapshot
         from backend.pattern_analyst import detect_patterns
+        from backend.news_filter import get_upcoming_events, _currencies_for_symbol
+        from datetime import datetime, timezone
 
         bars = int(settings.mt5_fetcher.get("bars_per_tf", 100))
         ohlcv = fetch_ohlcv(symbol, bars)
@@ -105,7 +108,34 @@ def get_market_snapshot(symbol: str) -> dict:
 
         indicators = compute_indicators(ohlcv)
         patterns   = detect_patterns(ohlcv)
-        snapshot_text = format_market_snapshot(ohlcv, indicators, patterns)
+
+        now = datetime.now(timezone.utc)
+        clean_sym = symbol.replace("m", "")
+        currencies = _currencies_for_symbol(clean_sym)
+        news_events = []
+        for c in currencies:
+            news_events.extend(get_upcoming_events(c, now, lookahead_hours=12))
+        
+        # Deduplicate and sort
+        seen = set()
+        unique_news = []
+        for ev in news_events:
+            if ev.title not in seen:
+                unique_news.append(ev)
+                seen.add(ev.title)
+        unique_news.sort(key=lambda x: x.event_time)
+
+        dxy_trend = None
+        dxy_symbol = settings.mt5_fetcher.get("dxy_symbol", "")
+        if dxy_symbol and dxy_symbol != "":
+            dxy_ohlcv = fetch_ohlcv(dxy_symbol, bars)
+            if dxy_ohlcv:
+                dxy_ind = compute_indicators(dxy_ohlcv)
+                dxy_trend = dxy_ind.trend_bias
+            else:
+                dxy_trend = "Unavailable (Could not fetch symbol)"
+
+        snapshot_text = format_market_snapshot(ohlcv, indicators, patterns, unique_news, dxy_trend)
 
         return {
             "symbol": symbol,
@@ -161,6 +191,7 @@ def place_order(
     tp1: float,
     tp2: float | None = None,
     tp3: float | None = None,
+    time_stop_hours: int | None = None,
     comment: str = "ClaudeAgent",
     order_type: str = "MARKET",
     limit_price: float | None = None,
@@ -250,6 +281,13 @@ def place_order(
             max_sl_pips = int(risk_cfg.get("max_sl_pips", 100))
             if sl_pips > max_sl_pips:
                 return {"error": f"SL too wide: {sl_pips:.0f} pips exceeds max {max_sl_pips} pips for {symbol}. Use tighter structure."}
+
+        # Inject time_stop_hours into comment (max 31 chars total)
+        if time_stop_hours is not None:
+            ts_str = f" expr:{time_stop_hours}h"
+            if len(comment) + len(ts_str) > 31:
+                comment = comment[:31 - len(ts_str)]
+            comment += ts_str
 
         # Round lot to broker step
         step = sym_info.volume_step

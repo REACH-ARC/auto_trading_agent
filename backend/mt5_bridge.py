@@ -24,7 +24,7 @@ if TYPE_CHECKING:
 #   "symbol": "EURUSD",
 #   "account": {"equity": 10000, "balance": 10000, "open_trades": 0, "daily_pnl": 0},
 #   "timeframes": {
-#     "M15": [{"time": "2024-01-15T10:00:00+00:00", "open":1.1,"high":1.105,"low":1.095,"close":1.1,"volume":1000},...],
+#     "M5": [{"time": "2024-01-15T10:00:00+00:00", "open":1.1,"high":1.105,"low":1.095,"close":1.1,"volume":1000},...],
 #     "H1":  [...], "H4": [...], "D1": [...]
 #   }
 # }

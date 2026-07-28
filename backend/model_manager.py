@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from config import settings as _settings
 
-_active_model: str = "ollama"
+_active_model: str = "multi_agent"
 _active_strategy: str = "ema_pullback"
 
 _str_cfg  = _settings._yaml.get("strategy", {})
@@ -19,9 +19,10 @@ _sl_amount_usd: float = float(_risk_cfg.get("sl_amount_usd", 50.0))
 _sl_amount_usc: float = float(_risk_cfg.get("sl_amount_usc", 1000.0))
 
 AVAILABLE_MODELS: dict[str, str] = {
-    "claude":    "External Model",
-    "ollama":    "Ollama (local/free)",
-    "strategy":  "Strategy (No AI)",
+    "claude":      "Claude 3.5",
+    "ollama":      "Ollama (local/free)",
+    "multi_agent": "Multi-Model (Ollama + DeepSeek)",
+    "strategy":    "Strategy (No AI)",
 }
 
 AVAILABLE_STRATEGIES: dict[str, str] = {

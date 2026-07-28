@@ -17,6 +17,7 @@ from loguru import logger
 from config import settings
 from backend.indicators import IndicatorResult, OHLCVData, SRLevel
 from backend.pattern_analyst import PatternResult, detect_patterns
+from backend.news_filter import NewsEvent
 
 # ---------------------------------------------------------------------------
 # AI-01  Base structure — types & constants
@@ -160,7 +161,7 @@ def _fmt_patterns(patterns: PatternResult) -> list[str]:
         for p in patterns.candle_patterns:
             lines.append(f"    [{p.timeframe}] {p.name} — {p.direction} ({p.strength})")
     else:
-        lines.append("  Candlestick: None detected on M15/H1/H4")
+        lines.append("  Candlestick: None detected on M5/H1/H4")
 
     if patterns.chart_patterns:
         lines.append("  Chart:")
@@ -186,8 +187,6 @@ def _fmt_patterns(patterns: PatternResult) -> list[str]:
             )
     else:
         lines.append("  FVG: None detected")
-    else:
-        lines.append("  Chart: None detected on H4/D1")
 
     return lines
 
@@ -196,6 +195,8 @@ def format_market_snapshot(
     data: OHLCVData,
     indicators: IndicatorResult,
     patterns: PatternResult | None = None,
+    news_events: list[NewsEvent] | None = None,
+    dxy_trend: str | None = None,
 ) -> str:
     """Convert raw OHLCV + indicators into a structured text prompt for Claude."""
     tfs = list(data.timeframes.keys())
@@ -207,6 +208,16 @@ def format_market_snapshot(
         f"Current Price: {current_price:.5f}",
         f"Timestamp    : {data.received_at.strftime('%Y-%m-%d %H:%M UTC')}",
         f"Trend Bias   : {indicators.trend_bias} (from H4 EMA alignment)",
+    ]
+
+    if dxy_trend is not None:
+        lines += [
+            f"",
+            f"--- Multi-Asset Correlation ---",
+            f"  DXY Trend: {dxy_trend}",
+        ]
+
+    lines += [
         f"",
         f"--- Active Sessions ---",
     ]
@@ -234,6 +245,8 @@ def format_market_snapshot(
         e50 = emas.get(50, 0)
         e200 = emas.get(200, 0)
         ema_order = f"EMA20={e20:.5f}  EMA50={e50:.5f}  EMA200={e200:.5f}"
+        vol_ratio = indicators.rvol.get(tf, 1.0)
+        vol_label = "HIGH VOLUME" if vol_ratio > 1.5 else "Low Volume" if vol_ratio < 0.7 else "Average"
 
         lines += [
             f"",
@@ -243,6 +256,7 @@ def format_market_snapshot(
             f"signal={macd.get('signal', 0):.6f}  "
             f"hist={macd.get('histogram', 0):.6f}  bias={macd_bias}",
             f"    ATR(14)  : {atr:.6f}",
+            f"    RVOL(20) : {vol_ratio}x ({vol_label})",
             f"    EMAs     : {ema_order}",
         ]
 
@@ -253,14 +267,48 @@ def format_market_snapshot(
     ]
 
     if patterns is not None:
-        lines.extend(_fmt_patterns(patterns))
+        lines += _fmt_patterns(patterns) if patterns else ["", "  Pattern analysis skipped."]
 
-    lines += [
-        f"",
-        f"=== END SNAPSHOT ===",
-        f"",
-        f"Analyse the above snapshot and provide your trading signal as JSON.",
-    ]
+    lines += ["", "--- Overextension / Mean Reversion ---"]
+    for tf in tfs:
+        dist = indicators.ema_distance_atr.get(tf, 0.0)
+        label = "Neutral"
+        if dist >= 1.5:
+            label = "Overextended Bullish"
+        elif dist <= -1.5:
+            label = "Overextended Bearish"
+        elif dist > 0.5:
+            label = "Bullish Momentum"
+        elif dist < -0.5:
+            label = "Bearish Momentum"
+        
+        sign = "+" if dist > 0 else ""
+        lines.append(f"  [{tf}] Price vs EMA20: {sign}{dist:.1f} ATR ({label})")
+
+    lines += ["", "--- Session Liquidity Pools ---"]
+    highs = indicators.session_highs
+    lows = indicators.session_lows
+    if "Daily" in highs:
+        lines.append(f"  Daily High : {highs['Daily']:.5f}")
+        lines.append(f"  Daily Low  : {lows['Daily']:.5f}")
+    if "Asian" in highs:
+        lines.append(f"  Asian High : {highs['Asian']:.5f}")
+        lines.append(f"  Asian Low  : {lows['Asian']:.5f}")
+
+    if news_events is not None:
+        lines += ["", "--- Upcoming Macro News (Next 12h) ---"]
+        if not news_events:
+            lines.append("  No high-impact news in the next 12 hours.")
+        else:
+            now = datetime.now(timezone.utc)
+            for event in news_events:
+                hrs = (event.event_time - now).total_seconds() / 3600.0
+                lines.append(f"  [{event.impact}] {event.title} (in {hrs:.1f} hours)")
+
+    lines.append("")
+    lines.append("=== END SNAPSHOT ===")
+    lines.append("")
+    lines.append("Analyse the above snapshot and provide your trading signal as JSON.")
 
     return "\n".join(lines)
 

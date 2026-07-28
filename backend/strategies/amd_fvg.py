@@ -55,31 +55,29 @@ def _find_sweep(
     """
     Scan the last `lookback` H1 bars for a liquidity sweep.
 
-    Bullish sweep: bar.low < recent_swing_low  AND  bar.close > recent_swing_low
-    Bearish sweep: bar.high > recent_swing_high AND  bar.close < recent_swing_high
+    ref_lookback defines the accumulation window (≈ one session, 5-8 H1 bars)
+    whose swing high/low the sweep bar must breach and recover.
 
-    Returns (sweep_extreme, bar_index) where bar_index is the absolute index
-    in `bars` where the sweep occurred, or (None, None) if not found.
+    Bullish sweep: bar.low < session_swing_low  AND  bar.close > session_swing_low
+    Bearish sweep: bar.high > session_swing_high AND  bar.close < session_swing_high
+
+    Returns (sweep_extreme, bar_index) or (None, None).
     """
     n = len(bars)
-    # Don't check the very last bar (still forming) or beyond lookback
     search_start = max(0, n - lookback - 1)
     search_end   = n - 1
 
     for i in range(search_end - 1, search_start - 1, -1):
         bar = bars[i]
-        # Reference range: up to ref_lookback bars before bar[i]
         ref = bars[max(0, i - ref_lookback):i]
-        if len(ref) < 4:
+        if len(ref) < 3:
             continue
 
         if bias == "BUY":
             swing_low = min(b.low for b in ref)
-            # Wick below swing low, close back above it
             if bar.low < swing_low and bar.close > swing_low:
                 return bar.low, i
-
-        else:  # SELL
+        else:
             swing_high = max(b.high for b in ref)
             if bar.high > swing_high and bar.close < swing_high:
                 return bar.high, i
@@ -121,10 +119,12 @@ def _find_fvg(
 # ---------------------------------------------------------------------------
 
 def analyse(ohlcv: OHLCVData, indicators: IndicatorResult) -> SignalResult:
-    cfg          = settings._yaml.get("strategy", {}).get("amd_fvg", {})
-    sweep_lkb    = int(cfg.get("sweep_lookback", 12))
-    ref_lkb      = int(cfg.get("ref_lookback", 15))
-    min_conf     = int(cfg.get("min_confidence", 65))
+    cfg           = settings._yaml.get("strategy", {}).get("amd_fvg", {})
+    sweep_lkb     = int(cfg.get("sweep_lookback", 20))
+    ref_lkb       = int(cfg.get("ref_lookback", 6))     # accumulation range = ~1 session (5-8 H1 bars)
+    sweep_max_age = int(cfg.get("sweep_max_age", 12))   # H1 bars — reject stale sweeps
+    min_fvg_atr   = float(cfg.get("min_fvg_atr", 0.15)) # FVG must be > N × H1 ATR
+    min_conf      = int(cfg.get("min_confidence", 65))
 
     symbol   = ohlcv.symbol
     tfs      = list(ohlcv.timeframes.keys())
@@ -158,14 +158,36 @@ def analyse(ohlcv: OHLCVData, indicators: IndicatorResult) -> SignalResult:
         return _no_trade(symbol, "Price at H4 EMA200 — no directional bias")
 
     # ------------------------------------------------------------------ #
-    # 2. Liquidity sweep (Manipulation phase)                             #
+    # 2. D1 trend alignment — required hard filter                        #
+    # ------------------------------------------------------------------ #
+    d1_emas   = indicators.ema.get("D1", {})
+    d1_ema200 = d1_emas.get(200, current_price)
+    d1_aligned = (bias == "BUY" and current_price > d1_ema200) or \
+                 (bias == "SELL" and current_price < d1_ema200)
+
+    if not d1_aligned:
+        return _no_trade(
+            symbol,
+            f"D1 EMA200 ({d1_ema200:.3f}) not aligned with {bias} — "
+            f"price={current_price:.3f} trading against daily trend"
+        )
+
+    # ------------------------------------------------------------------ #
+    # 3. Liquidity sweep (Manipulation phase)                             #
     # ------------------------------------------------------------------ #
     sweep_extreme, sweep_idx = _find_sweep(h1_bars, bias, sweep_lkb, ref_lkb, h1_atr)
     if sweep_extreme is None or sweep_idx is None:
         return _no_trade(symbol, f"No AMD liquidity sweep found in last {sweep_lkb} H1 bars")
 
+    sweep_age = len(h1_bars) - sweep_idx - 1
+    if sweep_age > sweep_max_age:
+        return _no_trade(
+            symbol,
+            f"Sweep is {sweep_age} H1 bars old (max {sweep_max_age}) — setup is stale, wait for a fresh sweep"
+        )
+
     # ------------------------------------------------------------------ #
-    # 3. FVG in the post-sweep distribution move                          #
+    # 4. FVG in the post-sweep distribution move                          #
     # ------------------------------------------------------------------ #
     post_sweep_bars = h1_bars[sweep_idx + 1:]
     if len(post_sweep_bars) < 3:
@@ -176,10 +198,17 @@ def analyse(ohlcv: OHLCVData, indicators: IndicatorResult) -> SignalResult:
         return _no_trade(symbol, "No FVG found in post-sweep distribution bars")
 
     fvg_low, fvg_high = fvg
-    fvg_mid = (fvg_low + fvg_high) / 2
+    fvg_size = fvg_high - fvg_low
+    fvg_mid  = (fvg_low + fvg_high) / 2
+
+    if fvg_size < min_fvg_atr * h1_atr:
+        return _no_trade(
+            symbol,
+            f"FVG too small: {fvg_size:.5f} < {min_fvg_atr}×ATR ({min_fvg_atr * h1_atr:.5f}) — not a meaningful imbalance"
+        )
 
     # ------------------------------------------------------------------ #
-    # 4. Entry condition — current M15 price inside the FVG               #
+    # 5. Entry condition — current M15 price inside the FVG               #
     # ------------------------------------------------------------------ #
     price_in_fvg = fvg_low <= current_price <= fvg_high
 
@@ -192,7 +221,7 @@ def analyse(ohlcv: OHLCVData, indicators: IndicatorResult) -> SignalResult:
         )
 
     # ------------------------------------------------------------------ #
-    # 5. M15 candle confirmation                                          #
+    # 6. M15 candle confirmation                                          #
     # ------------------------------------------------------------------ #
     candle_confirms = (
         (bias == "BUY"  and current_bar.close > current_bar.open) or
@@ -200,7 +229,7 @@ def analyse(ohlcv: OHLCVData, indicators: IndicatorResult) -> SignalResult:
     )
 
     # ------------------------------------------------------------------ #
-    # 6. Supporting confluence                                             #
+    # 7. Supporting confluence                                             #
     # ------------------------------------------------------------------ #
     d1_emas   = indicators.ema.get("D1", {})
     d1_ema200 = d1_emas.get(200, current_price)
@@ -219,19 +248,19 @@ def analyse(ohlcv: OHLCVData, indicators: IndicatorResult) -> SignalResult:
     confidence = 0
     confluence: list[str] = []
 
-    # Bias (required)
+    # H4 bias (required)
     confidence += 20
     confluence.append(f"H4 EMA200 {'bullish' if bias == 'BUY' else 'bearish'} bias")
 
-    if d1_aligned:
-        confidence += 15
-        confluence.append(f"D1 EMA200 confirms {bias} bias")
+    # D1 alignment (required — always passes at this point)
+    confidence += 15
+    confluence.append(f"D1 EMA200 ({d1_ema200:.3f}) confirms {bias} bias")
 
     # AMD sweep detected (already verified above)
     confidence += 20
     confluence.append(
         f"Liquidity sweep at {sweep_extreme:.5f} "
-        f"({len(h1_bars) - sweep_idx - 1} H1 bars ago)"
+        f"({sweep_age} H1 bars ago)"
     )
 
     # FVG found (already verified above)

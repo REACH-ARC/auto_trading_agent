@@ -276,6 +276,20 @@ async def update_outcome(
     return updated
 
 
+async def reset_history() -> bool:
+    """Clear all records from the signals table."""
+    try:
+        async with aiosqlite.connect(_DB_PATH) as db:
+            await db.execute("DELETE FROM signals")
+            await db.execute("DELETE FROM sqlite_sequence WHERE name='signals'")
+            await db.commit()
+        logger.info("Trade history has been completely reset.")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to reset history: {e}")
+        return False
+
+
 # ---------------------------------------------------------------------------
 # LOG-05  Stats query
 # ---------------------------------------------------------------------------

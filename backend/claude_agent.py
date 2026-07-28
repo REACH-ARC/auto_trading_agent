@@ -29,7 +29,7 @@ import backend.model_manager as model_manager
 _SYSTEM_PROMPT_TEMPLATE = """\
 You are an autonomous trading agent with live access to MetaTrader 5.
 You have tools to read market data, manage open positions, and execute trades.
-You are triggered every time a new M15 bar closes.
+You are triggered every time a new M5 bar closes.
 
 ## Decision loop — follow this exact order every trigger:
 
@@ -52,14 +52,14 @@ Call get_market_snapshot(symbol) for the primary symbol.
 Analyse using this framework:
   1. TREND  — H4 + D1 EMA alignment and price structure (HH/HL or LH/LL)
   2. STRUCTURE — where is price relative to key S/R levels?
-  3. MOMENTUM — RSI and MACD confluence across M15, H1, H4
+  3. MOMENTUM — RSI and MACD confluence across M5, H1, H4
   4. ENTRY — prefer limit entries at S/R zones; breakout entries need strong momentum
   5. CONFIDENCE — score 0–100 counting confluence factors:
        +15 trend alignment (H4 + D1 agree)
        +15 price at key S/R level
        +10 RSI confluence (not overbought/oversold against direction)
        +10 MACD histogram supports direction on H1+H4
-       +10 M15 momentum confirms direction
+       +10 M5 momentum confirms direction
        +10 no conflicting open position in same symbol
        +10 high liquidity session (for crypto: strong volume/volatility period)
        +20 additional strong factors (divergence, clean break, engulfing candle, etc.)
@@ -270,7 +270,7 @@ _TOOLS = [
         "name": "get_market_snapshot",
         "description": (
             "Fetch live OHLCV data and compute all indicators (RSI, MACD, ATR, EMA 20/50/200, "
-            "S/R levels) across M15/H1/H4/D1. Returns a formatted analysis snapshot. "
+            "S/R levels) across M5/H1/H4/D1. Returns a formatted analysis snapshot. "
             "Always call this before making any trade decision."
         ),
         "input_schema": {
@@ -312,6 +312,7 @@ _TOOLS = [
                 "tp1": {"type": "number", "description": "Take profit 1 — 1.5R from entry (SL_distance × 1.5)"},
                 "tp2": {"type": "number", "description": "Take profit 2 — 2.0R from entry (SL_distance × 2.0)"},
                 "tp3": {"type": "number", "description": "Take profit 3 — 2.5R from entry (SL_distance × 2.5); MT5 closes here"},
+                "time_stop_hours": {"type": "integer", "description": "Optional timeframe (hours) to hold position before auto-closing at market if target not reached. E.g. 4 for intraday, 24 for swing."},
                 "comment": {"type": "string", "description": "Trade label (max 31 chars)"},
             },
             "required": ["symbol", "direction", "lot_size", "sl", "tp1", "tp2", "tp3"],
@@ -726,7 +727,7 @@ def _build_initial_prompt(
         )
 
     return (
-        f"New M15 bar closed — {symbol}\n"
+        f"New M5 bar closed — {symbol}\n"
         f"Time: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}"
         f"{level_context}"
         f"{news_context}"
@@ -853,7 +854,7 @@ async def run_agent(
     skip_analysis: bool = False,
 ) -> AgentResult:
     """
-    Run one full agent cycle triggered by a new M15 bar.
+    Run one full agent cycle triggered by a new M5 bar.
     Dispatches to Claude or Ollama backend based on the active model selection.
     Switch models at runtime via Telegram /model command.
     """
@@ -865,6 +866,20 @@ async def run_agent(
         f"alerts={len(alert_hits) if alert_hits else 0} "
         f"skip_analysis={skip_analysis}"
     )
+
+    if active == "multi_agent":
+        from backend.multi_agent import run_agent_multi_model
+        return await run_agent_multi_model(
+            symbol=symbol,
+            account=account,
+            telegram_notifier=telegram_notifier,
+            max_iterations=max_iterations,
+            level_hits=level_hits,
+            news_events=news_events,
+            alert_hits=alert_hits,
+            skip_analysis=skip_analysis,
+            auto_trade=auto_trade,
+        )
 
     if active == "ollama":
         initial_prompt = _build_initial_prompt(
