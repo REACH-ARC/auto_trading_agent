@@ -55,6 +55,7 @@ Call send_update() with a summary covering:
 - Market bias and key levels observed
 - Position management actions taken
 - Trade placed OR why no trade was taken
+- If there is an existing position with a 'time_remaining' field, YOU MUST prominently display the time left until exit (e.g., 'Time Stop: 2.5h left')
 """
 
 
@@ -63,7 +64,7 @@ async def _run_scout(symbol: str, timeframe: str) -> str:
     ollama_cfg = settings.ollama
     base_url = ollama_cfg.get("base_url", "http://localhost:11434/v1")
     model_name = ollama_cfg.get("model", "gpt-oss:120b-cloud")
-    client = AsyncOpenAI(base_url=base_url, api_key="ollama")
+    client = AsyncOpenAI(base_url=base_url, api_key=settings.ollama_api_key)
     
     from backend.mt5_tools import get_market_snapshot
     snapshot_result = await asyncio.to_thread(get_market_snapshot, symbol)

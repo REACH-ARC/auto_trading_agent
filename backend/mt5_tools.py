@@ -67,6 +67,19 @@ def get_open_positions(symbol: str | None = None) -> dict:
             price_move = current_price - entry_price if p.type == 0 else entry_price - current_price
             r_moved = round(price_move / sl_distance, 2) if sl_distance > 0 else 0
 
+            time_remaining = None
+            if p.comment:
+                import re, time
+                match = re.search(r'expr:(\d+)h', p.comment)
+                if match and p.time > 0:
+                    expr_hours = int(match.group(1))
+                    age_seconds = time.time() - p.time
+                    rem_seconds = (expr_hours * 3600) - age_seconds
+                    if rem_seconds > 0:
+                        time_remaining = f"{rem_seconds/3600:.1f}h left"
+                    else:
+                        time_remaining = "EXPIRED"
+
             result.append({
                 "ticket": p.ticket,
                 "symbol": p.symbol,
@@ -81,6 +94,7 @@ def get_open_positions(symbol: str | None = None) -> dict:
                 "time_setup": p.time,
                 "open_time": datetime.fromtimestamp(p.time, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
                 "comment": p.comment,
+                "time_remaining": time_remaining,
             })
 
         return {"positions": result, "count": len(result)}
