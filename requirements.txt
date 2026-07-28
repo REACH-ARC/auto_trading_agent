@@ -9,6 +9,7 @@ uvicorn[standard]>=0.32.0
 # MT5 Bridge
 pyzmq>=26.2.0
 MetaTrader5>=5.0.45
+tornado>=6.1                     # Required by pyzmq on Windows asyncio
 
 # Technical Indicators
 pandas>=2.2.0

@@ -70,7 +70,7 @@ def disconnect() -> None:
         pass
 
 
-def fetch_ohlcv(symbol: str, bars: int = 100) -> OHLCVData | None:
+def fetch_ohlcv(symbol: str, bars: int = 100, silent: bool = False) -> OHLCVData | None:
     """Fetch M5/H1/H4/D1 bars for symbol from the MT5 terminal."""
     import MetaTrader5 as mt5
 
@@ -78,7 +78,8 @@ def fetch_ohlcv(symbol: str, bars: int = 100) -> OHLCVData | None:
     for tf_name in _TF_NAMES:
         rates = mt5.copy_rates_from_pos(symbol, _tf_const(tf_name), 0, bars)
         if rates is None or len(rates) == 0:
-            logger.warning(f"MT5: no {tf_name} data for {symbol} — {mt5.last_error()}")
+            if not silent:
+                logger.warning(f"MT5: no {tf_name} data for {symbol} — {mt5.last_error()}")
             continue
         timeframes[tf_name] = [
             Bar(
@@ -93,7 +94,8 @@ def fetch_ohlcv(symbol: str, bars: int = 100) -> OHLCVData | None:
         ]
 
     if not timeframes:
-        logger.error(f"MT5: could not fetch any data for {symbol}")
+        if not silent:
+            logger.error(f"MT5: could not fetch any data for {symbol}")
         return None
 
     return OHLCVData(

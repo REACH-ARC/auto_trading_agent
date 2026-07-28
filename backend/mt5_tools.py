@@ -128,7 +128,7 @@ def get_market_snapshot(symbol: str) -> dict:
         dxy_trend = None
         dxy_symbol = settings.mt5_fetcher.get("dxy_symbol", "")
         if dxy_symbol and dxy_symbol != "":
-            dxy_ohlcv = fetch_ohlcv(dxy_symbol, bars)
+            dxy_ohlcv = fetch_ohlcv(dxy_symbol, bars, silent=True)
             if dxy_ohlcv:
                 dxy_ind = compute_indicators(dxy_ohlcv)
                 dxy_trend = dxy_ind.trend_bias
