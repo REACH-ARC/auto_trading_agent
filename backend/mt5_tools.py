@@ -102,6 +102,38 @@ def get_open_positions(symbol: str | None = None) -> dict:
         return {"error": str(e)}
 
 
+def get_recent_closed_deals(hours: int = 48) -> dict:
+    """Fetch recent deals from MT5 history (deals that closed positions)."""
+    try:
+        mt5 = _mt5()
+        import time
+        now = time.time()
+        from_time = now - (hours * 3600)
+        
+        deals = mt5.history_deals_get(from_time, now)
+        if deals is None:
+            return {"error": f"MT5 history deals fetch failed: {mt5.last_error()}"}
+            
+        result = []
+        for d in deals:
+            if d.entry != mt5.DEAL_ENTRY_OUT:
+                continue
+            
+            result.append({
+                "ticket": d.ticket,
+                "position_id": d.position_id,
+                "symbol": d.symbol,
+                "original_direction": "BUY" if d.type == mt5.DEAL_TYPE_SELL else "SELL",
+                "profit": d.profit,
+                "price": d.price,
+                "time": d.time,
+                "comment": d.comment
+            })
+            
+        return {"deals": result, "count": len(result)}
+    except Exception as e:
+        return {"error": str(e)}
+
 def get_market_snapshot(symbol: str) -> dict:
     """
     Fetch OHLCV data, compute all indicators, and return a formatted snapshot.

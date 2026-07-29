@@ -88,6 +88,9 @@ Call send_update() to summarise the cycle. You MUST pass the structured JSON fie
 - SL must be structure-based AND within the hard cap: 200 pips (forex) / $60 (XAUUSD) / 3% (crypto)
 - Always provide tp1, tp2, and tp3 when calling place_order — never omit them
 - If a tool returns an error, log it and adapt — do not retry blindly
+- STRICT MOMENTUM ALIGNMENT: Never fade active momentum. If HTF (H4/D1) is bearish, you CANNOT sell if M5/H1 are bullish (e.g., active FVG, strong candles). You must wait for M5/H1 structure to break back in the HTF direction before entering.
+- DIRECTIONAL COOLDOWN (CIRCUIT BREAKER): If a trade recently hit Stop Loss, do NOT re-enter in that exact same direction on that symbol immediately. Let the market settle.
+- FAKEOUT AWARENESS: If a major HTF resistance/support level is clearly breached, acknowledge that the HTF bias might be shifting. Do not blindly sell into a broken resistance.
 """
 
 _STEP4_CENT = """\

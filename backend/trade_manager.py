@@ -38,6 +38,7 @@ async def trade_manager_loop() -> None:
             await asyncio.sleep(interval)
             try:
                 await asyncio.to_thread(_manage_all_positions)
+                await _sync_closed_signals()
             except Exception as e:
                 logger.error(f"Trade manager error: {e}")
     except asyncio.CancelledError:
@@ -152,3 +153,55 @@ def _manage_all_positions() -> None:
             logger.info(
                 f"Trade manager: ✅ SL updated — {symbol} ticket={ticket} new_sl={target_sl:.5f}"
             )
+
+
+async def _sync_closed_signals() -> None:
+    from backend.signal_logger import get_pending_signals, update_outcome
+    from backend.mt5_tools import get_open_positions, get_recent_closed_deals
+    
+    pending = await get_pending_signals()
+    if not pending:
+        return
+        
+    open_res = await asyncio.to_thread(get_open_positions)
+    if "error" in open_res:
+        logger.warning(f"Trade manager sync: cannot read positions — {open_res['error']}")
+        return
+    
+    live_positions = open_res.get("positions", [])
+    
+    closed_res = await asyncio.to_thread(get_recent_closed_deals, 72)
+    closed_deals = closed_res.get("deals", []) if "error" not in closed_res else []
+    
+    for sig in pending:
+        is_open = any(p["symbol"] == sig.symbol and p["direction"] == sig.direction for p in live_positions)
+        if is_open:
+            continue
+            
+        matching_deals = [
+            d for d in closed_deals 
+            if d["symbol"] == sig.symbol and d["original_direction"] == sig.direction
+        ]
+        
+        if not matching_deals:
+            logger.warning(f"Signal {sig.id} ({sig.symbol} {sig.direction}) is closed but no MT5 deal found in last 72h.")
+            continue
+            
+        latest_deal = sorted(matching_deals, key=lambda x: x["time"], reverse=True)[0]
+        pnl = latest_deal["profit"]
+        close_price = latest_deal["price"]
+        
+        if pnl > 0:
+            outcome = "WIN"
+        elif pnl < 0:
+            outcome = "LOSS"
+        else:
+            outcome = "BREAKEVEN"
+            
+        logger.info(f"Syncing closed signal {sig.id} ({sig.symbol}) -> {outcome} (PNL: {pnl:.2f})")
+        await update_outcome(
+            signal_id=sig.id,
+            outcome=outcome,
+            close_price=close_price,
+            actual_pnl=pnl
+        )
