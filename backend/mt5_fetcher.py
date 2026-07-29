@@ -279,16 +279,17 @@ async def fetcher_loop(run_pipeline_fn, get_symbol_fn=None) -> None:
             account = await asyncio.to_thread(fetch_account)
 
             # Skip full market analysis when a position is open and nothing notable happened.
-            # The agent will still run Steps 1+2+5 (position management) every bar.
+            # Agent-set alerts are NOT used to override skip — they were causing the AI
+            # to wake up every single bar (alerts set at nearby prices trigger immediately).
+            # Only structural S/R level_hits should wake the AI. News override is handled in main.py.
             skip_analysis = (
                 account.open_trades > 0
                 and not level_hits
-                and not alert_hits
             )
             if skip_analysis:
                 logger.debug(
                     f"MT5 fetcher: skip_analysis=True for {symbol} "
-                    f"(open_trades={account.open_trades}, no level/alert hits)"
+                    f"(open_trades={account.open_trades}, no level hits)"
                 )
 
             # Keep scanner cache current
