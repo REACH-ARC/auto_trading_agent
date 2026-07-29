@@ -277,9 +277,13 @@ class TelegramNotifier:
             return
         await self._send_raw(_format_news_warning(events))
 
-    async def send_agent_update(self, message: str) -> None:
-        """Send a free-form agent decision update (HTML supported)."""
-        await self._send_raw(_sanitize_html(message))
+    async def send_agent_update(self, data: str | dict) -> None:
+        """Send a structured agent decision update (HTML supported)."""
+        if isinstance(data, str):
+            await self._send_raw(_sanitize_html(data))
+        else:
+            text = _format_structured_update(data)
+            await self._send_raw(text)
 
     async def send_daily_summary(self, stats: SignalStats) -> None:
         """Send the daily performance summary."""
@@ -1041,6 +1045,64 @@ class TelegramNotifier:
 
 def _direction_icon(direction: str) -> str:
     return "🟢" if direction == "BUY" else "🔴" if direction == "SELL" else "⚪"
+
+
+def _format_structured_update(data: dict) -> str:
+    """Format structured agent update JSON into a consistent Telegram template."""
+    msg_type = data.get("message_type", "info")
+    symbol = data.get("symbol", "UNKNOWN")
+    direction = data.get("direction", "NONE")
+    reason = html.escape(data.get("reason", "No reason provided."))
+    
+    # Financial data
+    entry = data.get("entry_price")
+    sl = data.get("sl")
+    tp = data.get("tp")
+    r_moved = data.get("r_moved")
+    conf = data.get("confidence")
+    acc_bal = data.get("account_balance")
+    d_pnl = data.get("daily_pnl")
+
+    def _fmt(val): return f"{val:.5f}" if val is not None else "—"
+    def _usd(val): return f"${val:,.2f}" if val is not None else "—"
+    
+    acc_str = ""
+    if acc_bal is not None or d_pnl is not None:
+        pnl_sign = "+" if d_pnl and d_pnl > 0 else ""
+        acc_str = f"\n\n🏦 <b>Account:</b> {_usd(acc_bal)} | <b>P&L:</b> {pnl_sign}{_usd(d_pnl)}"
+
+    dir_str = f" {_direction_icon(direction)} <b>{direction}</b>" if direction != "NONE" else ""
+
+    if msg_type == "new_position":
+        title = f"🟢 <b>NEW POSITION</b> | {symbol}{dir_str}"
+        body = (
+            f"<b>Entry:</b> {_fmt(entry)}\n"
+            f"<b>SL:</b> {_fmt(sl)} | <b>TP:</b> {_fmt(tp)}\n"
+            f"<b>Confidence:</b> {conf}%"
+            f"\n\n<b>Analysis:</b>\n<i>{reason}</i>"
+        )
+    elif msg_type == "manage_position":
+        title = f"🛡️ <b>MANAGE POSITION</b> | {symbol}{dir_str}"
+        r_str = f"{r_moved:.2f}R" if r_moved is not None else "—"
+        body = (
+            f"<b>R-Moved:</b> {r_str}\n"
+            f"<b>SL:</b> {_fmt(sl)} | <b>TP:</b> {_fmt(tp)}"
+            f"\n\n<b>Action:</b>\n<i>{reason}</i>"
+        )
+    elif msg_type == "force_close":
+        title = f"🛑 <b>FORCE CLOSE</b> | {symbol}{dir_str}"
+        body = f"<b>Action:</b>\n<i>{reason}</i>"
+    elif msg_type == "news":
+        title = f"📰 <b>NEWS AWARENESS</b> | {symbol}"
+        body = f"<b>Notice:</b>\n<i>{reason}</i>"
+    elif msg_type == "no_trade":
+        title = f"🟡 <b>NO TRADE</b> | {symbol}"
+        body = f"<b>Reason:</b>\n<i>{reason}</i>"
+    else:
+        title = f"ℹ️ <b>INFO</b> | {symbol}"
+        body = f"<i>{reason}</i>"
+
+    return f"{title}\n\n{body}{acc_str}"
 
 
 def _format_signal_message(signal: SignalResult, risk: RiskDecision) -> str:

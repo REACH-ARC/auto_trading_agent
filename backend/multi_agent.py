@@ -51,11 +51,13 @@ Read the Scout Summaries to evaluate:
 <<STEP4>>
 
 ### Step 5 — Telegram update (ALWAYS)
-Call send_update() with a summary covering:
-- Market bias and key levels observed
-- Position management actions taken
-- Trade placed OR why no trade was taken
-- If there is an existing position with a 'time_remaining' field, YOU MUST prominently display the time left until exit (e.g., 'Time Stop: 2.5h left')
+Call send_update() to summarise the cycle. You MUST pass the structured JSON fields:
+- message_type: Pick the most appropriate category (e.g., new_position, no_trade, info)
+- symbol: The active symbol
+- reason: Market bias, levels, and rationale for your decision
+- account_balance and daily_pnl: From your account check
+- Other fields as appropriate (entry, sl, tp, confidence, etc.)
+- If there is an existing position with a 'time_remaining' field, YOU MUST prominently display the time left until exit in the 'reason' field (e.g., 'Time Stop: 2.5h left')
 """
 
 
@@ -209,6 +211,38 @@ async def run_agent_multi_model(
                 if tc.function.name == "place_order" and tool_result.get("success"):
                     result.trade_placed = True
                     result.trade_ticket = tool_result.get("ticket")
+                    
+                    # Log the agent trade to the database
+                    try:
+                        from backend.signal_logger import log_signal
+                        from backend.claude_analyst import SignalResult
+                        from backend.risk_manager import RiskDecision
+                        
+                        entry_price = float(tool_result.get("entry_price") or tool_input.get("limit_price", 0.0))
+                        
+                        sig = SignalResult(
+                            symbol=symbol,
+                            direction=tool_input.get("direction", "BUY"),
+                            confidence=tool_input.get("confidence", 80),
+                            reasoning=tool_input.get("comment", "Multi-Agent Trade"),
+                            invalidation="See agent history",
+                            confluence_factors=[],
+                            entry=entry_price,
+                            sl=tool_input.get("sl"),
+                            tp1=tool_input.get("tp1"),
+                            tp2=tool_input.get("tp2"),
+                            tp3=tool_input.get("tp3"),
+                        )
+                        risk = RiskDecision(
+                            approved=True,
+                            lot_size=tool_input.get("lot_size", 0.0),
+                            risk_amount=0.0,
+                            sl_distance=abs(entry_price - tool_input.get("sl", 0.0))
+                        )
+                        await log_signal(sig, risk)
+                    except Exception as e:
+                        logger.error(f"Failed to log Multi-Agent trade to DB: {e}")
+
                 elif tc.function.name in ("modify_position", "close_position") and tool_result.get("success"):
                     result.positions_managed += 1
 

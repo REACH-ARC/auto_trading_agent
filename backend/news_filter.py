@@ -219,12 +219,14 @@ def get_all_upcoming_events(dt: datetime, lookahead_hours: float = 4.0) -> list[
 
 def _currencies_for_symbol(symbol: str) -> list[str]:
     """Return the currencies affected by a trading symbol."""
-    symbol_upper = symbol.upper()
-    if symbol_upper in _SYMBOL_CURRENCIES:
-        return _SYMBOL_CURRENCIES[symbol_upper]
+    from backend import account_manager
+    base_symbol = account_manager.strip_suffix(symbol).upper()
+    
+    if base_symbol in _SYMBOL_CURRENCIES:
+        return _SYMBOL_CURRENCIES[base_symbol]
     # Fallback: try to derive from 6-char FX pair (e.g. EURJPY → EUR, JPY)
-    if len(symbol_upper) == 6 and symbol_upper.isalpha():
-        return [symbol_upper[:3], symbol_upper[3:]]
+    if len(base_symbol) == 6 and base_symbol.isalpha():
+        return [base_symbol[:3], base_symbol[3:]]
     return []
 
 

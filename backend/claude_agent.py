@@ -68,11 +68,12 @@ Analyse using this framework:
 <<STEP4>>
 
 ### Step 5 — Telegram update (ALWAYS — even for no-trade)
-Call send_update() with a summary covering:
-- Market bias and key levels observed
-- Any position management actions taken
-- Trade placed (entry, SL, TP, lot, reason) OR why no trade was taken
-- Current account: equity, daily P&L, open trades
+Call send_update() to summarise the cycle. You MUST pass the structured JSON fields:
+- message_type: Pick the most appropriate category (e.g., new_position, no_trade, info)
+- symbol: The active symbol
+- reason: Market bias, levels, and rationale for your decision
+- account_balance and daily_pnl: From your account check
+- Other fields as appropriate (entry, sl, tp, confidence, etc.)
 
 ## Crypto-specific rules (BTCUSDc, ETHUSDc, etc.)
 - 24/7 market — do NOT penalise signals for being outside forex session hours
@@ -91,7 +92,7 @@ Call send_update() with a summary covering:
 _STEP4_CENT = """\
 NOTE: This is a **cent account** (USC). 100 USC = 1 USD. Account balance displayed in USC.
 
-- If confidence >= 65 AND no open position in the same direction for this symbol:
+- If confidence >= 80 AND no open position in the same direction for this symbol:
   a. Call get_symbol_info(symbol) to confirm tick value and lot constraints
   b. SL CONSTRAINT — place SL at the nearest structural invalidation (swing high/low).
      Target 100–200 pips for forex; $10–$60 for XAUUSD; 0.5–3% for crypto. Hard cap: 200 pips / $60 / 3%.
@@ -99,9 +100,9 @@ NOTE: This is a **cent account** (USC). 100 USC = 1 USD. Account balance display
   c. Calculate lot_size using the FIXED SL amount (1 000 USC per trade — do NOT use % of balance):
        lot_size = 1000 / (SL_distance_in_price × tick_value / tick_size)
      Then scale by confidence:
-       - confidence 65–74 → use 70% of calculated lots (cautious)
-       - confidence 75–84 → use 85% of calculated lots (moderate)
-       - confidence 85–94 → use 100% of calculated lots (confident)
+       - confidence 80–84 → use 70% of calculated lots (cautious)
+       - confidence 85–89 → use 85% of calculated lots (moderate)
+       - confidence 90–94 → use 100% of calculated lots (confident)
        - confidence 95–100 → use 100% of calculated lots (high conviction)
      Clamp to broker min_lot and max_lot from get_symbol_info(). Round to broker lot_step.
   d. Set all three TPs from entry:
@@ -110,12 +111,12 @@ NOTE: This is a **cent account** (USC). 100 USC = 1 USD. Account balance display
        TP3 = entry ± (SL_distance × 2.5)   — 250 pips at 100-pip SL
   e. Call place_order() with order_type="MARKET", passing sl, tp1, tp2, and tp3.
      MT5 hard-closes the position at TP3; the trade manager steps SL to TP1 then TP2 as each is hit.
-- If confidence < 65: NO_TRADE. Note what is missing."""
+- If confidence < 80: NO_TRADE. Note what is missing."""
 
 _STEP4_STANDARD = """\
 NOTE: This is a **standard account** (USD). Account balance is in real USD.
 
-- If confidence >= 65 AND no open position in the same direction for this symbol:
+- If confidence >= 80 AND no open position in the same direction for this symbol:
   a. Call get_symbol_info(symbol) to confirm tick value and lot constraints
   b. SL CONSTRAINT — place SL at the nearest structural invalidation (swing high/low).
      Target 100–200 pips for forex; $10–$60 for XAUUSD; 0.5–3% for crypto. Hard cap: 200 pips / $60 / 3%.
@@ -123,9 +124,9 @@ NOTE: This is a **standard account** (USD). Account balance is in real USD.
   c. Calculate lot_size using the FIXED SL amount ($50 USD per trade — do NOT use % of balance):
        lot_size = 50 / (SL_distance_in_price × tick_value / tick_size)
      Then scale by confidence:
-       - confidence 65–74 → use 70% of calculated lots (cautious)
-       - confidence 75–84 → use 85% of calculated lots (moderate)
-       - confidence 85–94 → use 100% of calculated lots (full risk)
+       - confidence 80–84 → use 70% of calculated lots (cautious)
+       - confidence 85–89 → use 85% of calculated lots (moderate)
+       - confidence 90–94 → use 100% of calculated lots (full risk)
        - confidence 95–100 → use 100% of calculated lots (high conviction)
      Clamp to broker min_lot and max_lot from get_symbol_info(). Round to broker lot_step.
   d. Set all three TPs from entry:
@@ -134,7 +135,7 @@ NOTE: This is a **standard account** (USD). Account balance is in real USD.
        TP3 = entry ± (SL_distance × 2.5)   — 250 pips at 100-pip SL
   e. Call place_order() with order_type="MARKET", passing sl, tp1, tp2, and tp3.
      MT5 hard-closes the position at TP3; the trade manager steps SL to TP1 then TP2 as each is hit.
-- If confidence < 65: NO_TRADE. Note what is missing."""
+- If confidence < 80: NO_TRADE. Note what is missing."""
 
 
 _ALERT_ONLY_SUFFIX = """
@@ -356,21 +357,28 @@ _TOOLS = [
         "name": "send_update",
         "description": (
             "Send a Telegram message summarising this agent cycle's decisions. "
-            "Always call this at the end — even for no-trade cycles."
+            "Always call this at the end — even for no-trade cycles. Use structured JSON fields."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "message": {
-                    "type": "string",
-                    "description": "Summary message (HTML supported for Telegram)",
-                },
                 "message_type": {
                     "type": "string",
-                    "enum": ["info", "trade_open", "trade_close", "warning", "no_trade"],
+                    "enum": ["new_position", "manage_position", "news", "force_close", "no_trade", "info"],
+                    "description": "The category of the update."
                 },
+                "symbol": {"type": "string", "description": "The symbol being analysed (e.g., XAUUSDm)"},
+                "direction": {"type": "string", "enum": ["BUY", "SELL", "NONE"], "description": "Trade direction if applicable."},
+                "entry_price": {"type": "number", "description": "Entry price for new trades, or current price for info"},
+                "sl": {"type": "number", "description": "Stop Loss price"},
+                "tp": {"type": "number", "description": "Take Profit price"},
+                "r_moved": {"type": "number", "description": "Current R-multiple if managing a position"},
+                "reason": {"type": "string", "description": "Short explanation of the decision (HTML supported)"},
+                "confidence": {"type": "integer", "description": "Confidence score 0-100"},
+                "account_balance": {"type": "number", "description": "Current account balance"},
+                "daily_pnl": {"type": "number", "description": "Current daily P&L"}
             },
-            "required": ["message", "message_type"],
+            "required": ["message_type", "symbol", "reason"],
         },
     },
     {
@@ -531,15 +539,14 @@ async def _execute_tool(
 ) -> dict:
     """Async dispatcher — Telegram is handled natively; MT5 calls run in a thread."""
     if name == "send_update":
-        msg = tool_input.get("message", "")
         if telegram_notifier is not None:
             try:
-                await telegram_notifier.send_agent_update(msg)
+                await telegram_notifier.send_agent_update(tool_input)
                 return {"success": True}
             except Exception as e:
                 logger.warning(f"Telegram send_update failed: {e}")
                 return {"success": False, "error": str(e)}
-        logger.info(f"[Telegram disabled] Agent update: {msg[:200]}")
+        logger.info(f"[Telegram disabled] Agent update: {tool_input.get('reason', 'No reason provided')}")
         return {"success": True, "note": "Telegram disabled"}
 
     return await asyncio.to_thread(_dispatch_tool, name, tool_input)
@@ -623,6 +630,38 @@ async def _run_agent_ollama(
                 if tc.function.name == "place_order" and tool_result.get("success"):
                     result.trade_placed = True
                     result.trade_ticket = tool_result.get("ticket")
+                    
+                    # Log the agent trade to the database
+                    try:
+                        from backend.signal_logger import log_signal
+                        from backend.claude_analyst import SignalResult
+                        from backend.risk_manager import RiskDecision
+                        
+                        entry_price = float(tool_result.get("entry_price") or tool_input.get("limit_price", 0.0))
+                        
+                        sig = SignalResult(
+                            symbol=symbol,
+                            direction=tool_input.get("direction", "BUY"),
+                            confidence=tool_input.get("confidence", 80),
+                            reasoning=tool_input.get("comment", "Agent Trade"),
+                            invalidation="See agent history",
+                            confluence_factors=[],
+                            entry=entry_price,
+                            sl=tool_input.get("sl"),
+                            tp1=tool_input.get("tp1"),
+                            tp2=tool_input.get("tp2"),
+                            tp3=tool_input.get("tp3"),
+                        )
+                        risk = RiskDecision(
+                            approved=True,
+                            lot_size=tool_input.get("lot_size", 0.0),
+                            risk_amount=0.0,
+                            sl_distance=abs(entry_price - tool_input.get("sl", 0.0))
+                        )
+                        await log_signal(sig, risk)
+                    except Exception as e:
+                        logger.error(f"Failed to log Ollama agent trade to DB: {e}")
+
                 elif tc.function.name in ("modify_position", "close_position") and tool_result.get("success"):
                     result.positions_managed += 1
 
@@ -810,6 +849,38 @@ async def _run_agent_claude(
                 if block.name == "place_order" and tool_result.get("success"):
                     result.trade_placed = True
                     result.trade_ticket = tool_result.get("ticket")
+                    
+                    # Log the agent trade to the database
+                    try:
+                        from backend.signal_logger import log_signal
+                        from backend.claude_analyst import SignalResult
+                        from backend.risk_manager import RiskDecision
+                        
+                        entry_price = float(tool_result.get("entry_price") or block.input.get("limit_price", 0.0))
+                        
+                        sig = SignalResult(
+                            symbol=symbol,
+                            direction=block.input.get("direction", "BUY"),
+                            confidence=block.input.get("confidence", 80), # Default to high confidence for agent trades
+                            reasoning=block.input.get("comment", "Agent Trade"),
+                            invalidation="See agent history",
+                            confluence_factors=[],
+                            entry=entry_price,
+                            sl=block.input.get("sl"),
+                            tp1=block.input.get("tp1"),
+                            tp2=block.input.get("tp2"),
+                            tp3=block.input.get("tp3"),
+                        )
+                        risk = RiskDecision(
+                            approved=True,
+                            lot_size=block.input.get("lot_size", 0.0),
+                            risk_amount=0.0,
+                            sl_distance=abs(entry_price - block.input.get("sl", 0.0))
+                        )
+                        await log_signal(sig, risk)
+                    except Exception as e:
+                        logger.error(f"Failed to log agent trade to DB: {e}")
+
                 elif block.name in ("modify_position", "close_position") and tool_result.get("success"):
                     result.positions_managed += 1
 

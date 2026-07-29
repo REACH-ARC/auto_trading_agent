@@ -52,8 +52,8 @@ return NO_TRADE. Never force a trade.
 6. REWARD — set TP1 at 1.5R, TP2 at 2.0R, TP3 at 2.5R from the entry.
 7. CONFLUENCE — count how many factors align (trend + structure + momentum +
    session). More confluence = higher confidence score.
-8. CONFIDENCE — score 0–100. Only return BUY or SELL if confidence >= 65.
-   Below 65, return NO_TRADE with reasoning explaining what is missing.
+8. CONFIDENCE — score 0–100. Only return BUY or SELL if confidence >= 80.
+   Below 80, return NO_TRADE with reasoning explaining what is missing.
 
 ## Session guidance
 - For forex and gold (XAUUSD): prefer signals during London (07:00–16:00 UTC) and
