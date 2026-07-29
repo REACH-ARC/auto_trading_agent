@@ -74,6 +74,7 @@ Call send_update() to summarise the cycle. You MUST pass the structured JSON fie
 - reason: Market bias, levels, and rationale for your decision
 - account_balance and daily_pnl: From your account check
 - Other fields as appropriate (entry, sl, tp, confidence, etc.)
+- If there is an existing position with a 'time_remaining' field, YOU MUST pass the time left until exit into the 'time_remaining' JSON field.
 
 ## Crypto-specific rules (BTCUSDc, ETHUSDc, etc.)
 - 24/7 market — do NOT penalise signals for being outside forex session hours
@@ -168,11 +169,13 @@ If no position is open, do NOT set alerts — they are for monitoring live trade
 """
 
 
-def _make_system_prompt(is_cent: bool, auto_trade: bool = True, has_open_positions: bool = False) -> str:
+def _make_system_prompt(is_cent: bool, auto_trade: bool = True, has_open_positions: bool = False, skip_analysis: bool = False) -> str:
     sl_usc = model_manager.get_sl_amount_usc()
     sl_usd = model_manager.get_sl_amount_usd()
 
-    if is_cent:
+    if skip_analysis:
+        step4 = "NOTE: You are in position management mode. Review open positions and manage them. Do not place new trades."
+    elif is_cent:
         step4 = (
             f"NOTE: This is a **cent account** (USC). 100 USC = 1 USD. Account balance displayed in USC.\n\n"
             f"- If confidence >= 65 AND no open position in the same direction for this symbol:\n"
@@ -231,11 +234,12 @@ def _make_system_prompt(is_cent: bool, auto_trade: bool = True, has_open_positio
     return prompt
 
 
-def _get_tools(auto_trade: bool = True) -> list[dict]:
-    """Return the agent tool list. Removes place_order when auto_trade is disabled."""
-    if auto_trade:
-        return _TOOLS
-    return [t for t in _TOOLS if t["name"] != "place_order"]
+def _get_tools(auto_trade: bool = True, skip_analysis: bool = False) -> list[dict]:
+    """Return the agent tool list. Removes place_order and get_symbol_info when managing positions or auto_trade is off."""
+    tools = _TOOLS
+    if not auto_trade or skip_analysis:
+        tools = [t for t in tools if t["name"] not in ("place_order", "get_symbol_info")]
+    return tools
 
 # ---------------------------------------------------------------------------
 # Tool schemas
@@ -376,7 +380,8 @@ _TOOLS = [
                 "reason": {"type": "string", "description": "Short explanation of the decision (HTML supported)"},
                 "confidence": {"type": "integer", "description": "Confidence score 0-100"},
                 "account_balance": {"type": "number", "description": "Current account balance"},
-                "daily_pnl": {"type": "number", "description": "Current daily P&L"}
+                "daily_pnl": {"type": "number", "description": "Current daily P&L"},
+                "time_remaining": {"type": "string", "description": "Time left until auto-close (e.g., '2.5h left') if applicable"}
             },
             "required": ["message_type", "symbol", "reason"],
         },
@@ -796,8 +801,8 @@ async def _run_agent_claude(
     initial_prompt = _build_initial_prompt(
         symbol, account, level_hits, news_events, alert_hits, skip_analysis
     )
-    system_prompt = _make_system_prompt(account.is_cent, auto_trade, has_positions)
-    active_tools = _get_tools(auto_trade)
+    system_prompt = _make_system_prompt(account.is_cent, auto_trade, has_positions, skip_analysis)
+    active_tools = _get_tools(auto_trade, skip_analysis)
 
     messages: list[dict] = [{"role": "user", "content": initial_prompt}]
     total_input = total_output = total_cache_read = total_cache_write = 0

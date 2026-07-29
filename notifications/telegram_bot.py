@@ -1084,9 +1084,10 @@ def _format_structured_update(data: dict) -> str:
     elif msg_type == "manage_position":
         title = f"🛡️ <b>MANAGE POSITION</b> | {symbol}{dir_str}"
         r_str = f"{r_moved:.2f}R" if r_moved is not None else "—"
+        time_stop_str = f"\n<b>Time Stop:</b> {data.get('time_remaining')}" if data.get('time_remaining') else ""
         body = (
             f"<b>R-Moved:</b> {r_str}\n"
-            f"<b>SL:</b> {_fmt(sl)} | <b>TP:</b> {_fmt(tp)}"
+            f"<b>SL:</b> {_fmt(sl)} | <b>TP:</b> {_fmt(tp)}{time_stop_str}"
             f"\n\n<b>Action:</b>\n<i>{reason}</i>"
         )
     elif msg_type == "force_close":

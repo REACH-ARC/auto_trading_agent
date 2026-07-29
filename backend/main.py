@@ -582,15 +582,18 @@ async def _lifespan(app: FastAPI):
                         logger.info(f"Agent cycle — news context injected for {ohlcv.symbol}: {names}")
                     # News overrides skip_analysis — always run full cycle during news
                     effective_skip = skip_analysis and not news_events
-                    await run_agent(
-                        ohlcv.symbol,
-                        account,
-                        telegram_notifier=telegram,
-                        level_hits=level_hits,
-                        news_events=news_events or None,
-                        alert_hits=alert_hits or None,
-                        skip_analysis=effective_skip,
-                    )
+                    if effective_skip:
+                        logger.debug(f"Agent cycle skipped for {ohlcv.symbol} — no events triggered (Event-Driven Wakeup)")
+                    else:
+                        await run_agent(
+                            ohlcv.symbol,
+                            account,
+                            telegram_notifier=telegram,
+                            level_hits=level_hits,
+                            news_events=news_events or None,
+                            alert_hits=alert_hits or None,
+                            skip_analysis=effective_skip,
+                        )
                 _state.signals_processed += 1
                 _state.last_signal_at = datetime.now(timezone.utc)
 

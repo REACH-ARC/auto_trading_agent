@@ -57,7 +57,7 @@ Call send_update() to summarise the cycle. You MUST pass the structured JSON fie
 - reason: Market bias, levels, and rationale for your decision
 - account_balance and daily_pnl: From your account check
 - Other fields as appropriate (entry, sl, tp, confidence, etc.)
-- If there is an existing position with a 'time_remaining' field, YOU MUST prominently display the time left until exit in the 'reason' field (e.g., 'Time Stop: 2.5h left')
+- If there is an existing position with a 'time_remaining' field, YOU MUST pass the time left until exit into the 'time_remaining' JSON field.
 """
 
 
@@ -106,9 +106,9 @@ async def get_scout_summaries(symbol: str) -> str:
     return "\n\n".join(results)
 
 
-def _deepseek_tools(auto_trade: bool = True) -> list[dict]:
+def _deepseek_tools(auto_trade: bool = True, skip_analysis: bool = False) -> list[dict]:
     """Return tools for DeepSeek, removing get_market_snapshot."""
-    tools = _get_tools(auto_trade)
+    tools = _get_tools(auto_trade, skip_analysis)
     tools = [t for t in tools if t["name"] != "get_market_snapshot"]
     
     return [
@@ -155,14 +155,17 @@ async def run_agent_multi_model(
     initial_prompt += scout_text
 
     from backend.claude_agent import _STEP4_CENT, _STEP4_STANDARD, _ALERT_ONLY_SUFFIX, _PRICE_ALERT_INSTRUCTIONS
-    step4 = _STEP4_CENT if account.is_cent else _STEP4_STANDARD
+    if skip_analysis:
+        step4 = "NOTE: You are in position management mode. Review open positions and manage them. Do not place new trades."
+    else:
+        step4 = _STEP4_CENT if account.is_cent else _STEP4_STANDARD
     sys_prompt = _DEEPSEEK_SYSTEM_PROMPT.replace("<<STEP4>>", step4)
     if not auto_trade:
         sys_prompt += _ALERT_ONLY_SUFFIX
     if account.open_trades > 0:
         sys_prompt += _PRICE_ALERT_INSTRUCTIONS
 
-    ot = _deepseek_tools(auto_trade)
+    ot = _deepseek_tools(auto_trade, skip_analysis)
     messages: list[dict] = [
         {"role": "system", "content": sys_prompt},
         {"role": "user", "content": initial_prompt},
