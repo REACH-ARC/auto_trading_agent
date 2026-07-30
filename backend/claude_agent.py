@@ -169,23 +169,20 @@ direction, entry, SL, TP, lot size, and reason — so the trader can decide manu
 """
 
 _PRICE_ALERT_INSTRUCTIONS = """
+## Price alerts — smarter market monitoring
+Call set_price_alert() to register key price levels you want to watch. When price crosses one of these levels, 
+a full agent cycle fires at the next bar close with your hint as context.
+This replaces blind 5-min polling with targeted, event-driven analysis, saving API costs.
 
-## Price alerts — smarter position monitoring
-After any cycle where you have an open position, call set_price_alert() to register
-the key levels you want to watch between bar closes. When price crosses one of these
-levels, a full agent cycle fires at the next bar close with your hint as context.
-This replaces blind 15-min polling with targeted, event-driven analysis.
+IF YOU HAVE AN OPEN POSITION:
+  Set alerts near your SL (to check for early exit) or TP (to lock in profit).
 
-Set 2–4 alerts per open position. Good candidates:
-  - Just inside your SL buffer (to catch near-misses early)
-  - At key S/R that would break your bias
-  - Near TP1 (to decide whether to let it run or lock in)
-
-Example: SL at 2650.00 → set_price_alert(symbol, 2655.00, "below",
-  "Price close to SL — check if invalidation structure broken, consider early exit")
+IF YOU DO NOT HAVE AN OPEN POSITION (i.e. NO_TRADE):
+  Set alerts at the key S/R levels you are waiting for before entering. 
+  Example: If you want to SELL but price is in the middle of a range, set_price_alert(symbol, 4050, "above", "Resistance hit — look for bearish rejection to SELL").
+  The system will sleep and ONLY wake you up when price hits your alert. 
 
 Always call clear_price_alerts() before setting a new batch so stale levels don't pile up.
-If no position is open, do NOT set alerts — they are for monitoring live trades only.
 """
 
 
@@ -249,8 +246,9 @@ def _make_system_prompt(is_cent: bool, auto_trade: bool = True, has_open_positio
     prompt = _SYSTEM_PROMPT_TEMPLATE.replace("<<STEP4>>", step4)
     if not auto_trade:
         prompt += _ALERT_ONLY_SUFFIX
-    if has_open_positions:
-        prompt += _PRICE_ALERT_INSTRUCTIONS
+    
+    # Always include alert instructions so AI can set entry alerts when NO_TRADE
+    prompt += _PRICE_ALERT_INSTRUCTIONS
     return prompt
 
 

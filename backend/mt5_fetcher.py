@@ -207,6 +207,7 @@ async def fetcher_loop(run_pipeline_fn, get_symbol_fn=None) -> None:
     last_symbol: str = initial_symbol
     watcher = LevelWatcher()
     alert_mgr = get_alert_manager()
+    last_analysis_times: dict[str, float] = {}
 
     try:
         while True:
@@ -278,15 +279,35 @@ async def fetcher_loop(run_pipeline_fn, get_symbol_fn=None) -> None:
 
             account = await asyncio.to_thread(fetch_account)
 
-            # Skip full market analysis when a position is open.
-            # Level hits and agent alerts provide context but do NOT override skip.
-            # Only news events (checked in main.py) override skip.
-            # The trade_manager handles breakeven/trailing SL mechanically.
+            # Skip logic overhaul for API cost savings:
+            # 1. If open_trades > 0: always skip full analysis (manage via trade_manager)
+            # 2. If open_trades == 0: skip full analysis IF we have pending alerts that haven't been hit
+            # 3. Wake up if a level/alert is hit, or if 2 hours have passed (timeout)
             skip_analysis = account.open_trades > 0
+            
+            if not skip_analysis:
+                if level_hits or alert_hits:
+                    skip_analysis = False
+                else:
+                    pending_alerts = alert_mgr.get_pending(symbol)
+                    now_ts = datetime.now(timezone.utc).timestamp()
+                    last_time = last_analysis_times.get(symbol, 0)
+                    
+                    if (now_ts - last_time) > 7200:  # 2 hours
+                        skip_analysis = False
+                        logger.info(f"MT5 fetcher: 2-hour timeout reached for {symbol}, forcing analysis.")
+                    elif not pending_alerts:
+                        skip_analysis = False  # Need AI to analyze and set alerts
+                    else:
+                        skip_analysis = True   # We have alerts, just wait for them
+            
+            if not skip_analysis:
+                last_analysis_times[symbol] = datetime.now(timezone.utc).timestamp()
+
             if skip_analysis:
                 logger.debug(
                     f"MT5 fetcher: skip_analysis=True for {symbol} "
-                    f"(open_trades={account.open_trades})"
+                    f"(open_trades={account.open_trades}, pending_alerts={len(alert_mgr.get_pending(symbol))})"
                 )
 
             # Keep scanner cache current

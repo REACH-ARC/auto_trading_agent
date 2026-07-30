@@ -60,6 +60,11 @@ Read the Scout Summaries to evaluate:
 ### Step 4 — Trade decision
 <<STEP4>>
 
+### Step 4.5 — Price Alerts (Smarter Monitoring)
+If you decided NO_TRADE, call set_price_alert() to register the key S/R levels you are waiting for before entering (e.g. "Wait for price to hit 4050 resistance"). 
+The system will sleep and ONLY wake you up when price hits your alert, saving API costs.
+Always call clear_price_alerts() before setting a new batch.
+
 ### Step 5 — Telegram update (ALWAYS)
 Call send_update() to summarise the cycle. You MUST pass the structured JSON fields:
 - message_type: Pick the most appropriate category (e.g., new_position, no_trade, info)
