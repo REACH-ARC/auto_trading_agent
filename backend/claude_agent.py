@@ -110,7 +110,9 @@ Call send_update() to summarise the cycle. You MUST pass the structured JSON fie
 - MAX 3 TRADES PER SYMBOL PER DAY (enforced in code). Orders beyond this limit will be rejected.
 """
 
-_STEP4_CENT = """\
+def get_step4_cent() -> str:
+    sl_usc = model_manager.get_sl_amount_usc()
+    return f"""\
 NOTE: This is a **cent account** (USC). 100 USC = 1 USD. Account balance displayed in USC.
 
 - If confidence >= 85 AND no open position in the same direction for this symbol:
@@ -123,8 +125,8 @@ NOTE: This is a **cent account** (USC). 100 USC = 1 USD. Account balance display
        - For XAUUSD, the final TP3 gap MUST be between $15 and $25 from entry. 
          (This means your structural SL distance MUST be between $6 and $10).
        - If the required SL distance pushes TP3 outside this $15-$25 gap, or if structure exceeds hard caps for other pairs (200 pips forex / 3% crypto), skip this trade — return NO_TRADE.
-  d. Calculate lot_size using the FIXED SL amount (1 000 USC per trade — do NOT use % of balance):
-       lot_size = 1000 / (SL_distance_in_price × tick_value / tick_size)
+  d. Calculate lot_size using the FIXED SL amount ({sl_usc:,.0f} USC per trade — do NOT use % of balance):
+       lot_size = {sl_usc:,.0f} / (SL_distance_in_price × tick_value / tick_size)
      Then scale by confidence:
        - confidence 85–89 → use 85% of calculated lots (moderate)
        - confidence 90–94 → use 100% of calculated lots (confident)
@@ -134,7 +136,9 @@ NOTE: This is a **cent account** (USC). 100 USC = 1 USD. Account balance display
      MT5 hard-closes the position at TP3; the trade manager steps SL to TP1 then TP2 as each is hit.
 - If confidence < 85: NO_TRADE. Note what is missing."""
 
-_STEP4_STANDARD = """\
+def get_step4_standard() -> str:
+    sl_usd = model_manager.get_sl_amount_usd()
+    return f"""\
 NOTE: This is a **standard account** (USD). Account balance is in real USD.
 
 - If confidence >= 85 AND no open position in the same direction for this symbol:
@@ -147,8 +151,8 @@ NOTE: This is a **standard account** (USD). Account balance is in real USD.
        - For XAUUSD, the final TP3 gap MUST be between $15 and $25 from entry. 
          (This means your structural SL distance MUST be between $6 and $10).
        - If the required SL distance pushes TP3 outside this $15-$25 gap, or if structure exceeds hard caps for other pairs (200 pips forex / 3% crypto), skip this trade — return NO_TRADE.
-  d. Calculate lot_size using the FIXED SL amount ($50 USD per trade — do NOT use % of balance):
-       lot_size = 50 / (SL_distance_in_price × tick_value / tick_size)
+  d. Calculate lot_size using the FIXED SL amount (${sl_usd:,.2f} USD per trade — do NOT use % of balance):
+       lot_size = {sl_usd:,.2f} / (SL_distance_in_price × tick_value / tick_size)
      Then scale by confidence:
        - confidence 85–89 → use 85% of calculated lots (moderate)
        - confidence 90–94 → use 100% of calculated lots (full risk)
@@ -193,55 +197,9 @@ def _make_system_prompt(is_cent: bool, auto_trade: bool = True, has_open_positio
     if skip_analysis:
         step4 = "NOTE: You are in position management mode. Review open positions and manage them. Do not place new trades."
     elif is_cent:
-        step4 = (
-            f"NOTE: This is a **cent account** (USC). 100 USC = 1 USD. Account balance displayed in USC.\n\n"
-            f"- If confidence >= 65 AND no open position in the same direction for this symbol:\n"
-            f"  a. Call get_symbol_info(symbol) to confirm tick value and lot constraints\n"
-            f"  b. SL CONSTRAINT — place SL at the nearest structural invalidation (swing high/low).\n"
-            f"     Target 100–200 pips for forex; $10–$60 for XAUUSD; 0.5–3% for crypto. Hard cap: 200 pips / $60 / 3%.\n"
-            f"     If structure is beyond the cap, skip this trade — return NO_TRADE.\n"
-            f"  c. Calculate lot_size using the FIXED SL amount ({sl_usc:,.0f} USC per trade"
-            f" — do NOT use % of balance):\n"
-            f"       lot_size = {sl_usc:,.0f} / (SL_distance_in_price x tick_value / tick_size)\n"
-            f"     Then scale by confidence:\n"
-            f"       - confidence 65-74  -> use 70% of calculated lots (cautious)\n"
-            f"       - confidence 75-84  -> use 85% of calculated lots (moderate)\n"
-            f"       - confidence 85-94  -> use 100% of calculated lots (confident)\n"
-            f"       - confidence 95-100 -> use 100% of calculated lots (high conviction)\n"
-            f"     Clamp to broker min_lot and max_lot from get_symbol_info(). Round to broker lot_step.\n"
-            f"  d. Set all three TPs from entry:\n"
-            f"       TP1 = entry +/- (SL_distance x 1.5)   — 150 pips at 100-pip SL\n"
-            f"       TP2 = entry +/- (SL_distance x 2.0)   — 200 pips at 100-pip SL\n"
-            f"       TP3 = entry +/- (SL_distance x 2.5)   — 250 pips at 100-pip SL\n"
-            f"  e. Call place_order() with order_type=\"MARKET\", passing sl, tp1, tp2, and tp3.\n"
-            f"     MT5 hard-closes at TP3; trade manager steps SL to TP1 then TP2 as each is hit.\n"
-            f"- If confidence < 65: NO_TRADE. Note what is missing."
-        )
+        step4 = get_step4_cent()
     else:
-        step4 = (
-            f"NOTE: This is a **standard account** (USD). Account balance is in real USD.\n\n"
-            f"- If confidence >= 65 AND no open position in the same direction for this symbol:\n"
-            f"  a. Call get_symbol_info(symbol) to confirm tick value and lot constraints\n"
-            f"  b. SL CONSTRAINT — place SL at the nearest structural invalidation (swing high/low).\n"
-            f"     Target 100–200 pips for forex; $10–$60 for XAUUSD; 0.5–3% for crypto. Hard cap: 200 pips / $60 / 3%.\n"
-            f"     If structure is beyond the cap, skip this trade — return NO_TRADE.\n"
-            f"  c. Calculate lot_size using the FIXED SL amount (${sl_usd:,.2f} USD per trade"
-            f" — do NOT use % of balance):\n"
-            f"       lot_size = {sl_usd:,.2f} / (SL_distance_in_price x tick_value / tick_size)\n"
-            f"     Then scale by confidence:\n"
-            f"       - confidence 65-74  -> use 70% of calculated lots (cautious)\n"
-            f"       - confidence 75-84  -> use 85% of calculated lots (moderate)\n"
-            f"       - confidence 85-94  -> use 100% of calculated lots (full risk)\n"
-            f"       - confidence 95-100 -> use 100% of calculated lots (high conviction)\n"
-            f"     Clamp to broker min_lot and max_lot from get_symbol_info(). Round to broker lot_step.\n"
-            f"  d. Set all three TPs from entry:\n"
-            f"       TP1 = entry +/- (SL_distance x 1.5)   — 150 pips at 100-pip SL\n"
-            f"       TP2 = entry +/- (SL_distance x 2.0)   — 200 pips at 100-pip SL\n"
-            f"       TP3 = entry +/- (SL_distance x 2.5)   — 250 pips at 100-pip SL\n"
-            f"  e. Call place_order() with order_type=\"MARKET\", passing sl, tp1, tp2, and tp3.\n"
-            f"     MT5 hard-closes at TP3; trade manager steps SL to TP1 then TP2 as each is hit.\n"
-            f"- If confidence < 65: NO_TRADE. Note what is missing."
-        )
+        step4 = get_step4_standard()
 
     prompt = _SYSTEM_PROMPT_TEMPLATE.replace("<<STEP4>>", step4)
     if not auto_trade:

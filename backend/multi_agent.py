@@ -176,11 +176,11 @@ async def run_agent_multi_model(
     )
     initial_prompt += scout_text
 
-    from backend.claude_agent import _STEP4_CENT, _STEP4_STANDARD, _ALERT_ONLY_SUFFIX, _PRICE_ALERT_INSTRUCTIONS
+    from backend.claude_agent import get_step4_cent, get_step4_standard, _ALERT_ONLY_SUFFIX, _PRICE_ALERT_INSTRUCTIONS
     if skip_analysis:
         step4 = "NOTE: You are in position management mode. Review open positions and manage them. Do not place new trades."
     else:
-        step4 = _STEP4_CENT if account.is_cent else _STEP4_STANDARD
+        step4 = get_step4_cent() if account.is_cent else get_step4_standard()
     sys_prompt = _DEEPSEEK_SYSTEM_PROMPT.replace("<<STEP4>>", step4)
     if not auto_trade:
         sys_prompt += _ALERT_ONLY_SUFFIX
