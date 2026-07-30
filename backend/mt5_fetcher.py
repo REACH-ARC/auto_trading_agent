@@ -286,7 +286,10 @@ async def fetcher_loop(run_pipeline_fn, get_symbol_fn=None) -> None:
             skip_analysis = account.open_trades > 0
             
             if not skip_analysis:
-                if level_hits or alert_hits:
+                # We want to save API costs. ONLY wake up if an explicit agent alert was hit,
+                # or if we have no alerts set, or on timeout. Do NOT wake up just because
+                # a mechanical S/R level was hit (that happens too often in ranges).
+                if alert_hits:
                     skip_analysis = False
                 else:
                     pending_alerts = alert_mgr.get_pending(symbol)
