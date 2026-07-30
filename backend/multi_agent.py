@@ -42,10 +42,20 @@ Your only job here is early exit protection:
 You do NOT need to call get_market_snapshot. The technical analysis for all timeframes has already been 
 completed by the Scout models (GPT-OSS-120B) and is provided in the user prompt below.
 Read the Scout Summaries to evaluate:
+
+  0. MARKET REGIME — CLASSIFY FIRST:
+     - TRENDING: Price making new HH/HL or LH/LL. Trade pullbacks in trend direction.
+     - RANGING: Price bouncing between same S/R. Do NOT trade breakdowns — only range bounces.
+  
   1. TREND (H4/D1)
   2. STRUCTURE (S/R levels)
-  3. MOMENTUM (RSI/MACD)
+  3. MOMENTUM (RSI/MACD) — ALL 4 timeframes must agree. If ANY opposes, reduce confidence by 15-20.
   4. ENTRY & CONFIDENCE (Score 0-100)
+
+## Trading philosophy — QUALITY OVER QUANTITY
+- Aim for 1-2 HIGH-QUALITY trades per day maximum. Zero trades is perfectly fine.
+- BOTH directions are valid. Do NOT lock into one direction because the daily is bearish.
+- Never chase. Wait for the next setup.
 
 ### Step 4 — Trade decision
 <<STEP4>>
@@ -58,6 +68,13 @@ Call send_update() to summarise the cycle. You MUST pass the structured JSON fie
 - account_balance and daily_pnl: From your account check
 - Other fields as appropriate (entry, sl, tp, confidence, etc.)
 - If there is an existing position with a 'time_remaining' field, YOU MUST pass the time left until exit into the 'time_remaining' JSON field.
+
+## Hard rules (enforced in code — orders will be REJECTED if violated)
+- MAX 3 TRADES PER SYMBOL PER DAY
+- 2-HOUR DIRECTIONAL COOLDOWN after Stop Loss hit (same direction blocked)
+- Minimum SL distance for XAUUSD: $6
+- STRICT MOMENTUM ALIGNMENT: ALL timeframes must agree. Do NOT sell if M5/H1 are bullish.
+- FAKEOUT AWARENESS: If S/R broken and reclaimed 2+ times → market is RANGING. Stop trading breakdowns.
 """
 
 

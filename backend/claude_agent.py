@@ -50,19 +50,30 @@ Your only job here is early exit protection:
 ### Step 3 — Market analysis
 Call get_market_snapshot(symbol) for the primary symbol.
 Analyse using this framework:
+
+  0. MARKET REGIME — CLASSIFY FIRST, before anything else:
+     - Is H4 ATR expanding or contracting vs its 20-period average?
+     - Is price making new HH/HL (uptrend) or LH/LL (downtrend) on H4?
+     - Or is price bouncing between the SAME support and resistance repeatedly? → RANGING
+     If RANGING: Do NOT trade breakdowns or breakouts — they will fake out. Only trade bounces off the range edges.
+     If TRENDING: Trade pullbacks to structure in the trend direction. Breakouts are valid with momentum.
+  
   1. TREND  — H4 + D1 EMA alignment and price structure (HH/HL or LH/LL)
   2. STRUCTURE — where is price relative to key S/R levels?
   3. MOMENTUM — RSI and MACD confluence across M5, H1, H4
+     CRITICAL: ALL four timeframes (M5, H1, H4, D1) must agree on direction. If ANY timeframe has active opposing momentum (RSI divergence, MACD opposing), reduce confidence by 15-20 points.
   4. ENTRY — prefer limit entries at S/R zones; breakout entries need strong momentum
   5. CONFIDENCE — score 0–100 counting confluence factors:
        +15 trend alignment (H4 + D1 agree)
        +15 price at key S/R level
        +10 RSI confluence (not overbought/oversold against direction)
        +10 MACD histogram supports direction on H1+H4
-       +10 M5 momentum confirms direction
+       +10 M5 momentum confirms direction (NOT opposing!)
        +10 no conflicting open position in same symbol
        +10 high liquidity session (for crypto: strong volume/volatility period)
        +20 additional strong factors (divergence, clean break, engulfing candle, etc.)
+       -20 if market is RANGING and you're trading a breakdown/breakout
+       -15 if ANY timeframe has active opposing momentum
 
 ### Step 4 — Trade decision
 <<STEP4>>
@@ -81,6 +92,11 @@ Call send_update() to summarise the cycle. You MUST pass the structured JSON fie
 - Volatility is the session equivalent — trade during high-volume periods
 - BTC often trends strongly; ride winners with trailing stops
 
+## Trading philosophy — QUALITY OVER QUANTITY
+- You should aim for 1-2 HIGH-QUALITY trades per day maximum. If no setup meets all criteria, it is perfectly fine to trade ZERO times. Patience is rewarded.
+- BOTH directions are valid. Do NOT lock into one direction just because the daily chart is bearish. In a ranging market, buying at support is just as valid as selling at resistance.
+- Never chase. If you missed the move, wait for the next setup.
+
 ## Hard rules (also enforced server-side)
 - Risk exactly the fixed SL amount per trade: 1 000 USC (cent) or $50 USD (standard) — never % of balance
 - Never exceed 3 open trades
@@ -88,60 +104,59 @@ Call send_update() to summarise the cycle. You MUST pass the structured JSON fie
 - SL must be structure-based AND within the hard cap: 200 pips (forex) / $60 (XAUUSD) / 3% (crypto)
 - Always provide tp1, tp2, and tp3 when calling place_order — never omit them
 - If a tool returns an error, log it and adapt — do not retry blindly
-- STRICT MOMENTUM ALIGNMENT: Never fade active momentum. If HTF (H4/D1) is bearish, you CANNOT sell if M5/H1 are bullish (e.g., active FVG, strong candles). You must wait for M5/H1 structure to break back in the HTF direction before entering.
-- DIRECTIONAL COOLDOWN (CIRCUIT BREAKER): If a trade recently hit Stop Loss, do NOT re-enter in that exact same direction on that symbol immediately. Let the market settle.
-- FAKEOUT AWARENESS: If a major HTF resistance/support level is clearly breached, acknowledge that the HTF bias might be shifting. Do not blindly sell into a broken resistance.
+- STRICT MOMENTUM ALIGNMENT: You CANNOT enter a trade if M5 or H1 have active opposing momentum. Example: if you want to SELL, M5 and H1 must NOT be bullish (no active FVG, no strong green candles, RSI must not be rising). Wait for ALL timeframes to align.
+- DIRECTIONAL COOLDOWN (CIRCUIT BREAKER — enforced in code): After a Stop Loss hit, the system BLOCKS the same direction for 2 hours. If you try, the order will be rejected. After cooldown, you must have confidence >= 90 to re-enter that direction.
+- FAKEOUT AWARENESS: If a key S/R level is broken, immediately reassess your bias. If the same level has been broken and reclaimed 2+ times, the market is RANGING — stop trading breakdowns.
+- MAX 3 TRADES PER SYMBOL PER DAY (enforced in code). Orders beyond this limit will be rejected.
 """
 
 _STEP4_CENT = """\
 NOTE: This is a **cent account** (USC). 100 USC = 1 USD. Account balance displayed in USC.
 
-- If confidence >= 80 AND no open position in the same direction for this symbol:
+- If confidence >= 85 AND no open position in the same direction for this symbol:
   a. Call get_symbol_info(symbol) to confirm tick value and lot constraints
   b. SL CONSTRAINT — place SL at the nearest structural invalidation (swing high/low).
   c. TP & VALIDITY CHECK:
        - Set TP1 = entry ± (SL_distance × 1.5)
        - Set TP2 = entry ± (SL_distance × 2.0)
        - Set TP3 = entry ± (SL_distance × 2.5)
-       - For XAUUSD, the final TP3 gap MUST be between $10 and $20 from entry. 
-         (This means your structural SL distance MUST be between $4 and $8).
-       - If the required SL distance pushes TP3 outside this $10-$20 gap, or if structure exceeds hard caps for other pairs (200 pips forex / 3% crypto), skip this trade — return NO_TRADE.
+       - For XAUUSD, the final TP3 gap MUST be between $15 and $25 from entry. 
+         (This means your structural SL distance MUST be between $6 and $10).
+       - If the required SL distance pushes TP3 outside this $15-$25 gap, or if structure exceeds hard caps for other pairs (200 pips forex / 3% crypto), skip this trade — return NO_TRADE.
   d. Calculate lot_size using the FIXED SL amount (1 000 USC per trade — do NOT use % of balance):
        lot_size = 1000 / (SL_distance_in_price × tick_value / tick_size)
      Then scale by confidence:
-       - confidence 80–84 → use 70% of calculated lots (cautious)
        - confidence 85–89 → use 85% of calculated lots (moderate)
        - confidence 90–94 → use 100% of calculated lots (confident)
        - confidence 95–100 → use 100% of calculated lots (high conviction)
      Clamp to broker min_lot and max_lot from get_symbol_info(). Round to broker lot_step.
   e. Call place_order() with order_type="MARKET", passing sl, tp1, tp2, and tp3.
      MT5 hard-closes the position at TP3; the trade manager steps SL to TP1 then TP2 as each is hit.
-- If confidence < 80: NO_TRADE. Note what is missing."""
+- If confidence < 85: NO_TRADE. Note what is missing."""
 
 _STEP4_STANDARD = """\
 NOTE: This is a **standard account** (USD). Account balance is in real USD.
 
-- If confidence >= 80 AND no open position in the same direction for this symbol:
+- If confidence >= 85 AND no open position in the same direction for this symbol:
   a. Call get_symbol_info(symbol) to confirm tick value and lot constraints
   b. SL CONSTRAINT — place SL at the nearest structural invalidation (swing high/low).
   c. TP & VALIDITY CHECK:
        - Set TP1 = entry ± (SL_distance × 1.5)
        - Set TP2 = entry ± (SL_distance × 2.0)
        - Set TP3 = entry ± (SL_distance × 2.5)
-       - For XAUUSD, the final TP3 gap MUST be between $10 and $20 from entry. 
-         (This means your structural SL distance MUST be between $4 and $8).
-       - If the required SL distance pushes TP3 outside this $10-$20 gap, or if structure exceeds hard caps for other pairs (200 pips forex / 3% crypto), skip this trade — return NO_TRADE.
+       - For XAUUSD, the final TP3 gap MUST be between $15 and $25 from entry. 
+         (This means your structural SL distance MUST be between $6 and $10).
+       - If the required SL distance pushes TP3 outside this $15-$25 gap, or if structure exceeds hard caps for other pairs (200 pips forex / 3% crypto), skip this trade — return NO_TRADE.
   d. Calculate lot_size using the FIXED SL amount ($50 USD per trade — do NOT use % of balance):
        lot_size = 50 / (SL_distance_in_price × tick_value / tick_size)
      Then scale by confidence:
-       - confidence 80–84 → use 70% of calculated lots (cautious)
        - confidence 85–89 → use 85% of calculated lots (moderate)
        - confidence 90–94 → use 100% of calculated lots (full risk)
        - confidence 95–100 → use 100% of calculated lots (high conviction)
      Clamp to broker min_lot and max_lot from get_symbol_info(). Round to broker lot_step.
   e. Call place_order() with order_type="MARKET", passing sl, tp1, tp2, and tp3.
      MT5 hard-closes the position at TP3; the trade manager steps SL to TP1 then TP2 as each is hit.
-- If confidence < 80: NO_TRADE. Note what is missing."""
+- If confidence < 85: NO_TRADE. Note what is missing."""
 
 
 _ALERT_ONLY_SUFFIX = """

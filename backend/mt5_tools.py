@@ -297,6 +297,54 @@ def place_order(
                     )
                 }
 
+        # Guard: max trades per symbol per day (hard limit = 3)
+        try:
+            import aiosqlite, asyncio
+            from datetime import date as _date
+            _db_path = settings.database["path"]
+            today_str = _date.today().isoformat()
+            # Run sync query via sqlite3 (we're already in a thread)
+            import sqlite3
+            _conn = sqlite3.connect(_db_path)
+            _row = _conn.execute(
+                "SELECT COUNT(*) FROM signals WHERE symbol = ? AND direction IN ('BUY','SELL') AND created_at >= ?",
+                (symbol, today_str)
+            ).fetchone()
+            _conn.close()
+            _today_count = _row[0] if _row else 0
+            _max_daily = int(risk_cfg.get("max_trades_per_symbol_per_day", 3))
+            if _today_count >= _max_daily:
+                return {"error": f"Daily trade limit reached for {symbol}: {_today_count}/{_max_daily} trades today. Wait until tomorrow."}
+        except Exception as _e:
+            logger.warning(f"Daily trade limit check failed (non-blocking): {_e}")
+
+        # Guard: 2-hour directional cooldown after a loss
+        try:
+            import time as _time
+            _now = _time.time()
+            _cooldown_hours = float(risk_cfg.get("directional_cooldown_hours", 2.0))
+            _from_time = _now - (_cooldown_hours * 3600)
+            _deals = mt5.history_deals_get(_from_time, _now)
+            if _deals:
+                for _d in _deals:
+                    if _d.entry != mt5.DEAL_ENTRY_OUT:
+                        continue
+                    if _d.symbol != symbol:
+                        continue
+                    # DEAL_TYPE_SELL closing = original was BUY; DEAL_TYPE_BUY closing = original was SELL
+                    _orig_dir = "BUY" if _d.type == mt5.DEAL_TYPE_SELL else "SELL"
+                    if _orig_dir == direction and _d.profit < 0:
+                        _mins_ago = int((_now - _d.time) / 60)
+                        return {
+                            "error": (
+                                f"Directional cooldown: {direction} {symbol} lost ${abs(_d.profit):.2f} "
+                                f"{_mins_ago} min ago. Must wait {int(_cooldown_hours*60)} min before "
+                                f"re-entering {direction}. Try the opposite direction or wait."
+                            )
+                        }
+        except Exception as _e:
+            logger.warning(f"Directional cooldown check failed (non-blocking): {_e}")
+
         # Symbol validation
         sym_info = mt5.symbol_info(symbol)
         if sym_info is None:
@@ -314,7 +362,13 @@ def place_order(
         else:
             return {"error": "limit_price required for LIMIT/STOP orders"}
 
-        # Guard: minimum SL distance
+        # Guard: minimum SL distance for XAUUSD ($6)
+        _is_gold = any(x in symbol.upper() for x in ["XAU"])
+        _sl_dist = abs(price - sl)
+        if _is_gold and _sl_dist < 6.0:
+            return {"error": f"SL too tight for gold: ${_sl_dist:.2f} < $6.00 minimum. Widen your stop loss."}
+
+        # Guard: minimum SL distance (general)
         min_distance = sym_info.point * 10
         if abs(price - sl) < min_distance:
             return {"error": f"SL too close to entry (min distance: {min_distance:.5f})"}
