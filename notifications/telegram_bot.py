@@ -1079,7 +1079,7 @@ def _format_structured_update(data: dict) -> str:
             f"<b>Entry:</b> {_fmt(entry)}\n"
             f"<b>SL:</b> {_fmt(sl)} | <b>TP:</b> {_fmt(tp)}\n"
             f"<b>Confidence:</b> {conf}%"
-            f"\n\n<b>Analysis:</b>\n<i>{reason}</i>"
+            f"\n\n<b>Analysis:</b>\n{reason}"
         )
     elif msg_type == "manage_position":
         title = f"🛡️ <b>MANAGE POSITION</b> | {symbol}{dir_str}"
@@ -1088,20 +1088,20 @@ def _format_structured_update(data: dict) -> str:
         body = (
             f"<b>R-Moved:</b> {r_str}\n"
             f"<b>SL:</b> {_fmt(sl)} | <b>TP:</b> {_fmt(tp)}{time_stop_str}"
-            f"\n\n<b>Action:</b>\n<i>{reason}</i>"
+            f"\n\n<b>Action:</b>\n{reason}"
         )
     elif msg_type == "force_close":
         title = f"🛑 <b>FORCE CLOSE</b> | {symbol}{dir_str}"
-        body = f"<b>Action:</b>\n<i>{reason}</i>"
+        body = f"<b>Action:</b>\n{reason}"
     elif msg_type == "news":
         title = f"📰 <b>NEWS AWARENESS</b> | {symbol}"
-        body = f"<b>Notice:</b>\n<i>{reason}</i>"
+        body = f"<b>Notice:</b>\n{reason}"
     elif msg_type == "no_trade":
         title = f"🟡 <b>NO TRADE</b> | {symbol}"
-        body = f"<b>Reason:</b>\n<i>{reason}</i>"
+        body = f"<b>Reason:</b>\n{reason}"
     else:
         title = f"ℹ️ <b>INFO</b> | {symbol}"
-        body = f"<i>{reason}</i>"
+        body = f"{reason}"
 
     return f"{title}\n\n{body}{acc_str}"
 
@@ -1115,7 +1115,7 @@ def _format_signal_message(signal: SignalResult, risk: RiskDecision) -> str:
         reason = html.escape((signal.reasoning or "No setup found.")[:200])
         return (
             f"{title}\n\n"
-            f"<i>No trade signal — {reason}</i>"
+            f"No trade signal — {reason}"
         )
 
     rr_str   = f"{signal.risk_reward:.2f}" if signal.risk_reward else "n/a"
@@ -1152,8 +1152,8 @@ def _format_signal_message(signal: SignalResult, risk: RiskDecision) -> str:
         f"<b>TP3:</b>    <code>{_p(signal.tp3)}</code>  (+4.0R)\n\n"
         f"R:R: <b>{rr_str}</b>  |  Lot: <b>{risk.lot_size:.2f}</b>  |  {approved}"
         f"{warnings}{rejection}"
-        f"\n\n<b>Analysis:</b>\n<i>{reasoning}</i>"
-        f"\n\n<b>Invalidation:</b> <i>{invalidation}</i>"
+        f"\n\n<b>Analysis:</b>\n{reasoning}"
+        f"\n\n<b>Invalidation:</b> {invalidation}"
         f"{confluence}"
         f"\n\n<code>#{signal.symbol} #{signal.direction} #AIA</code>"
     )
