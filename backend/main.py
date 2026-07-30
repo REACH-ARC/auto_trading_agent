@@ -580,8 +580,13 @@ async def _lifespan(app: FastAPI):
                     if news_events:
                         names = ", ".join(f"{e.currency} '{e.title}'" for e in news_events)
                         logger.info(f"Agent cycle — news context injected for {ohlcv.symbol}: {names}")
-                    # News overrides skip_analysis — always run full cycle during news
-                    effective_skip = skip_analysis and not news_events
+                    # News overrides skip_analysis ONLY if we have an open position to manage.
+                    # If no open positions, waking up during a news block just wastes API calls 
+                    # for the AI to repeatedly say NO_TRADE, so we rely on the normal alert skip logic.
+                    if account.open_trades > 0:
+                        effective_skip = skip_analysis and not news_events
+                    else:
+                        effective_skip = skip_analysis
                     if effective_skip:
                         logger.debug(f"Agent cycle skipped for {ohlcv.symbol} — no events triggered (Event-Driven Wakeup)")
                     else:
