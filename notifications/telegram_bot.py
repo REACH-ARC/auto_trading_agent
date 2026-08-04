@@ -367,7 +367,9 @@ class TelegramNotifier:
         if not msg or not msg.text:
             return
         # Parse /command or /command@botname
-        cmd = msg.text.split()[0].lstrip("/").split("@")[0].lower()
+        parts = msg.text.split()
+        cmd = parts[0].lstrip("/").split("@")[0].lower()
+        context.args = parts[1:]
         routes = {
             "status":    self._cmd_status,
             "market":    self._cmd_market,
@@ -749,6 +751,7 @@ class TelegramNotifier:
                     value = float(args[0])
                     _mm.set_sl_amount_usd(value)
                     _mm.set_sl_amount_usc(value * 20)  # rough USC equiv (1 USD = 20 USC on cent)
+                    logger.info(f"Telegram: SL amount set via command to USD {value} / USC {value * 20}")
                     await update.effective_message.reply_text(
                         f"✅ SL amount updated — USD: <b>${value:,.2f}</b>  USC: <b>{value * 20:,.0f}</b>",
                         parse_mode="HTML",
@@ -759,12 +762,14 @@ class TelegramNotifier:
                     value = float(args[1])
                     if account_type in ("usd", "standard"):
                         _mm.set_sl_amount_usd(value)
+                        logger.info(f"Telegram: SL amount set via command to USD {value}")
                         await update.effective_message.reply_text(
                             f"✅ USD SL amount set to <b>${value:,.2f}</b> per trade.",
                             parse_mode="HTML",
                         )
                     elif account_type in ("usc", "cent"):
                         _mm.set_sl_amount_usc(value)
+                        logger.info(f"Telegram: SL amount set via command to USC {value}")
                         await update.effective_message.reply_text(
                             f"✅ USC SL amount set to <b>{value:,.0f} USC</b> per trade.",
                             parse_mode="HTML",
@@ -773,6 +778,7 @@ class TelegramNotifier:
                         raise ValueError(f"Unknown account type: {args[0]}")
                     return
             except ValueError as e:
+                logger.error(f"Telegram: Invalid SL command arguments: {args} - {e}")
                 await update.effective_message.reply_text(
                     f"⚠️ Invalid input: {e}\n"
                     f"Usage: <code>/sl 75</code>  or  <code>/sl usd 75</code>  or  <code>/sl usc 1500</code>",
@@ -810,9 +816,11 @@ class TelegramNotifier:
             if account_type == "usd":
                 _mm.set_sl_amount_usd(value)
                 label = f"${value:,.2f} USD"
+                logger.info(f"Telegram: SL amount set via button to USD {value}")
             else:
                 _mm.set_sl_amount_usc(value)
                 label = f"{value:,.0f} USC"
+                logger.info(f"Telegram: SL amount set via button to USC {value}")
         except ValueError as e:
             await query.answer(f"Error: {e}", show_alert=True)
             return
@@ -1283,7 +1291,7 @@ def _sl_status_text() -> str:
 
 def _build_sl_keyboard() -> InlineKeyboardMarkup:
     usd_presets = [25, 50, 75, 100, 150, 200]
-    usc_presets = [500, 1000, 1500, 2000, 3000, 5000]
+    usc_presets = [100, 500, 1000, 1500, 2000, 3000]
 
     usd_row1 = [InlineKeyboardButton(f"${v}", callback_data=f"set_sl:usd:{float(v)}") for v in usd_presets[:3]]
     usd_row2 = [InlineKeyboardButton(f"${v}", callback_data=f"set_sl:usd:{float(v)}") for v in usd_presets[3:]]
