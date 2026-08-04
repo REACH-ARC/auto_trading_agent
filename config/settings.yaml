@@ -66,7 +66,8 @@ risk:
 news_filter:
   enabled: true
   block_minutes_before: 30
-  block_minutes_after: 30
+  block_minutes_after: 60
+  close_open_positions_minutes: 15
   impact_levels:                    # block these impact levels
     - "HIGH"
     - "MEDIUM"

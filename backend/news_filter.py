@@ -299,3 +299,36 @@ def get_news_context_for_agent(
         ],
         key=lambda e: e.event_time,
     )
+
+
+def get_imminent_news_events(
+    symbol: str,
+    dt: datetime | None = None,
+    minutes: int = 15,
+) -> list[NewsEvent]:
+    """
+    Return high-impact news events that are releasing within the next `minutes`.
+    Used by trade_manager to auto-close positions right before news hits.
+    """
+    if not settings.news_filter["enabled"]:
+        return []
+
+    if dt is None:
+        dt = datetime.now(timezone.utc)
+
+    currencies = _currencies_for_symbol(symbol)
+    if not currencies:
+        return []
+
+    blocked_impacts: list[str] = settings.news_filter["impact_levels"]
+    window_end = dt + timedelta(minutes=minutes)
+
+    return sorted(
+        [
+            e for e in _cache.events
+            if e.currency in currencies
+            and e.impact in blocked_impacts
+            and dt <= e.event_time <= window_end
+        ],
+        key=lambda e: e.event_time,
+    )

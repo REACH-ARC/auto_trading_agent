@@ -25,6 +25,7 @@ _original_sl: dict[int, float] = {}
 
 
 async def trade_manager_loop() -> None:
+    from backend.news_filter import refresh_cache_if_stale
     cfg = settings._yaml.get("trade_manager", {})
     if not cfg.get("enabled", True):
         logger.info("Trade manager disabled in settings.yaml")
@@ -37,6 +38,7 @@ async def trade_manager_loop() -> None:
         while True:
             await asyncio.sleep(interval)
             try:
+                await refresh_cache_if_stale()
                 await asyncio.to_thread(_manage_all_positions)
                 await _sync_closed_signals()
             except Exception as e:
@@ -47,13 +49,18 @@ async def trade_manager_loop() -> None:
 
 def _manage_all_positions() -> None:
     from backend.mt5_tools import get_open_positions, modify_position, close_position
+    from backend.news_filter import get_imminent_news_events
     import re
     import time
+    from datetime import datetime, timezone
 
     cfg        = settings._yaml.get("trade_manager", {})
     be_r: float  = float(cfg.get("breakeven_at_r", 1.0))
     tp1_rr: float = float(settings.risk.get("tp1_rr_ratio", 1.5))
     tp2_rr: float = float(settings.risk.get("tp2_rr_ratio", 2.5))
+    
+    news_cfg = settings._yaml.get("news_filter", {})
+    close_mins: int = int(news_cfg.get("close_open_positions_minutes", 15))
 
     result = get_open_positions()
     if "error" in result:
@@ -91,6 +98,18 @@ def _manage_all_positions() -> None:
                     logger.info(f"Time Stop triggered for ticket {ticket} ({age_seconds/3600:.1f}h > {expr_hours}h). Closing position.")
                     close_position(ticket)
                     continue
+
+        # -------------------------------------------------------------
+        # News Stop Check
+        # -------------------------------------------------------------
+        if close_mins > 0:
+            now = datetime.now(timezone.utc)
+            imminent_news = get_imminent_news_events(symbol, now, minutes=close_mins)
+            if imminent_news:
+                names = ", ".join(f"{e.currency} '{e.title}'" for e in imminent_news)
+                logger.info(f"News Stop triggered for ticket {ticket}. Imminent news in <={close_mins}m: {names}. Closing position.")
+                close_position(ticket)
+                continue
 
         if cur_sl == 0.0:
             continue  # position has no SL — skip
