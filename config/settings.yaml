@@ -74,6 +74,13 @@ news_filter:
   warning_minutes_before: 30        # warn when event is within N minutes (matches block_minutes_before)
   warning_check_interval_min: 15    # how often the warning job runs
 
+kitco_news:
+  enabled: true
+  check_interval_min: 5             # how often to poll Kitco website
+  model: "deepseek"                 # AI model used for analysis (e.g. deepseek, claude, ollama)
+  min_impact_to_alert: "HIGH"       # Only send Telegram alert if AI rates as HIGH, MEDIUM, or LOW
+
+
 mt5_fetcher:
   enabled: true
   use_agent: true                   # true = full agent mode, false = signal-only analyst

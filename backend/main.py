@@ -340,6 +340,45 @@ async def _check_news_warning() -> None:
         await telegram.send_news_warning(new_warnings)
 
 
+async def _check_kitco_news() -> None:
+    """APScheduler job — poll Kitco for new gold news and run AI analysis."""
+    from backend.kitco_scraper import get_new_articles, add_analyzed_news
+    from backend.news_analyzer import analyze_news_article
+    
+    try:
+        new_articles = await get_new_articles()
+        for article in new_articles:
+            logger.info(f"New Kitco article found: {article['title']}")
+            analysis = await analyze_news_article(article['title'], article['summary'])
+            if not analysis:
+                continue
+                
+            analysis['title'] = article['title']
+            analysis['url'] = article['url']
+            
+            # Add to memory
+            add_analyzed_news(analysis)
+            
+            # Send Telegram alert if impact is HIGH, or matches config
+            min_impact = settings._yaml.get("kitco_news", {}).get("min_impact_to_alert", "HIGH").upper()
+            impact = analysis.get("impact", "LOW").upper()
+            
+            should_alert = False
+            if min_impact == "LOW":
+                should_alert = True
+            elif min_impact == "MEDIUM" and impact in ("HIGH", "MEDIUM"):
+                should_alert = True
+            elif min_impact == "HIGH" and impact == "HIGH":
+                should_alert = True
+                
+            if should_alert:
+                await telegram.send_news_analysis(article['title'], article['url'], analysis)
+                
+    except Exception as e:
+        logger.exception(f"Kitco news check failed: {e}")
+
+
+
 async def _on_scanner_signal(result: ScanResult) -> None:
     """
     Callback invoked by the scanner for each top-ranked signal per cycle.
@@ -555,6 +594,20 @@ async def _lifespan(app: FastAPI):
         id="news_warning_check",
     )
     logger.info(f"News warning check scheduled — every {warn_interval} min")
+
+    # Kitco news polling job
+    kitco_cfg = settings._yaml.get("kitco_news", {})
+    if kitco_cfg.get("enabled", True):
+        kitco_interval: int = int(kitco_cfg.get("check_interval_min", 5))
+        _state.scheduler.add_job(
+            _check_kitco_news,
+            trigger="interval",
+            minutes=kitco_interval,
+            id="kitco_news_check",
+            next_run_time=None,
+        )
+        logger.info(f"Kitco news polling scheduled — every {kitco_interval} min")
+
 
     _state.scheduler.start()
     logger.info(f"APScheduler started — daily summary at {summary_time} UTC")

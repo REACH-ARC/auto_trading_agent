@@ -285,6 +285,38 @@ class TelegramNotifier:
             text = _format_structured_update(data)
             await self._send_raw(text)
 
+    async def send_news_analysis(self, title: str, url: str, analysis: dict) -> None:
+        """Send Kitco AI news analysis to Telegram."""
+        if not self._enabled:
+            return
+            
+        impact = analysis.get("impact", "LOW").upper()
+        bias = analysis.get("bias", "NEUTRAL").upper()
+        summary = analysis.get("summary", "")
+        
+        impact_icon = "🔴" if impact == "HIGH" else "🟡" if impact == "MEDIUM" else "⚪"
+        bias_icon = "🟢" if bias == "BULLISH" else "🔴" if bias == "BEARISH" else "⚪"
+        
+        text = (
+            f"📰 <b>Kitco Gold News Alert</b>\n\n"
+            f"<b>{html.escape(title)}</b>\n"
+            f"<a href='{url}'>Read Article</a>\n\n"
+            f"<b>AI Impact:</b> {impact_icon} {impact}\n"
+            f"<b>AI Bias:</b> {bias_icon} {bias} ({analysis.get('confidence', 0)}%)\n\n"
+            f"<b>Summary:</b>\n{html.escape(summary)}\n\n"
+        )
+        
+        points = analysis.get("key_points", [])
+        if points:
+            text += "<b>Key Points:</b>\n"
+            for p in points:
+                text += f"• {html.escape(p)}\n"
+                
+        await self._send_raw(text)
+        if self._signal_channel_id and impact == "HIGH":
+            await self._send_to(self._signal_channel_id, text)
+
+
     async def send_daily_summary(self, stats: SignalStats) -> None:
         """Send the daily performance summary."""
         if not self._enabled:
@@ -775,10 +807,11 @@ class TelegramNotifier:
                             parse_mode="HTML",
                         )
                     else:
+                        logger.warning(f"Telegram: /sl command unknown account type: {account_type}")
                         raise ValueError(f"Unknown account type: {args[0]}")
                     return
             except ValueError as e:
-                logger.error(f"Telegram: Invalid SL command arguments: {args} - {e}")
+                logger.warning(f"Telegram: Invalid SL command arguments: {args} - {e}")
                 await update.effective_message.reply_text(
                     f"⚠️ Invalid input: {e}\n"
                     f"Usage: <code>/sl 75</code>  or  <code>/sl usd 75</code>  or  <code>/sl usc 1500</code>",
@@ -1293,10 +1326,10 @@ def _build_sl_keyboard() -> InlineKeyboardMarkup:
     usd_presets = [25, 50, 75, 100, 150, 200]
     usc_presets = [100, 500, 1000, 1500, 2000, 3000]
 
-    usd_row1 = [InlineKeyboardButton(f"${v}", callback_data=f"set_sl:usd:{float(v)}") for v in usd_presets[:3]]
-    usd_row2 = [InlineKeyboardButton(f"${v}", callback_data=f"set_sl:usd:{float(v)}") for v in usd_presets[3:]]
-    usc_row1 = [InlineKeyboardButton(f"{v}USC", callback_data=f"set_sl:usc:{float(v)}") for v in usc_presets[:3]]
-    usc_row2 = [InlineKeyboardButton(f"{v}USC", callback_data=f"set_sl:usc:{float(v)}") for v in usc_presets[3:]]
+    usd_row1 = [InlineKeyboardButton(f"${v} USD", callback_data=f"set_sl:usd:{float(v)}") for v in usd_presets[:3]]
+    usd_row2 = [InlineKeyboardButton(f"${v} USD", callback_data=f"set_sl:usd:{float(v)}") for v in usd_presets[3:]]
+    usc_row1 = [InlineKeyboardButton(f"{v} USC", callback_data=f"set_sl:usc:{float(v)}") for v in usc_presets[:3]]
+    usc_row2 = [InlineKeyboardButton(f"{v} USC", callback_data=f"set_sl:usc:{float(v)}") for v in usc_presets[3:]]
 
     return InlineKeyboardMarkup([
         usd_row1,

@@ -736,6 +736,24 @@ def _build_initial_prompt(
             + "\nRun your full 5-step decision loop. Use your hint above to guide Step 3 analysis."
         )
 
+    kitco_context = ""
+    if symbol.startswith("XAU"):
+        from backend.kitco_scraper import get_recent_kitco_news
+        kitco_news = get_recent_kitco_news()
+        if kitco_news:
+            lines = []
+            for kn in kitco_news:
+                lines.append(
+                    f"  • [{kn.get('impact')}] Bias: {kn.get('bias')} | {kn.get('title')}\n"
+                    f"    Summary: {kn.get('summary')}\n"
+                    f"    Key points: {', '.join(kn.get('key_points', []))}"
+                )
+            kitco_context = (
+                "\n\n🪙 GOLD FUNDAMENTALS (Kitco News):\n"
+                + "\n".join(lines)
+                + "\n\nFactor this fundamental bias into your Gold analysis."
+            )
+
     cycle_instruction = "Run your full decision loop now."
     if skip_analysis and not alert_hits and not level_hits and not news_events:
         cycle_instruction = (
@@ -751,6 +769,7 @@ def _build_initial_prompt(
         f"Time: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}"
         f"{level_context}"
         f"{news_context}"
+        f"{kitco_context}"
         f"{alert_context}\n\n"
         f"Current account snapshot (cached — fetch fresh via get_account_info):\n"
         f"  Equity={account.equity:.2f}  Balance={account.balance:.2f}  "
