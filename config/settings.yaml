@@ -9,7 +9,7 @@ claude:
 
 deepseek:
   base_url: "https://api.deepseek.com"
-  model: "deepseek-v4-pro"
+  model: "deepseek-v4-flash"
 
 ollama:
   base_url: "http://localhost:11434/v1"
