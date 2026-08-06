@@ -44,7 +44,7 @@ completed by the Scout models (GPT-OSS-120B) and is provided in the user prompt 
 Read the Scout Summaries to evaluate:
 
   0. MARKET REGIME — CLASSIFY FIRST:
-     - TRENDING: Price making new HH/HL or LH/LL. Trade pullbacks in trend direction.
+     - TRENDING: Price making new HH/HL or LH/LL. Trade pullbacks in trend direction. DO NOT chase breakouts.
      - RANGING: Price bouncing between same S/R. Do NOT trade breakdowns — only range bounces.
   
   1. TREND (H4/D1)
@@ -79,6 +79,8 @@ Call send_update() to summarise the cycle. You MUST pass the structured JSON fie
 - 2-HOUR DIRECTIONAL COOLDOWN after Stop Loss hit (same direction blocked)
 - Minimum SL distance for XAUUSD: $6
 - STRICT MOMENTUM ALIGNMENT: ALL timeframes must agree. Do NOT sell if M5/H1 are bullish.
+- OVEREXTENSION PREVENTION: DO NOT BUY if H1 or H4 RSI is > 75. DO NOT SELL if H1 or H4 RSI is < 25.
+- PULLBACKS ONLY: DO NOT take a breakout entry if the price is already more than 1 ATR away from the breakout level. YOU MUST wait for a pullback.
 - FAKEOUT AWARENESS: If S/R broken and reclaimed 2+ times → market is RANGING. Stop trading breakdowns.
 """
 

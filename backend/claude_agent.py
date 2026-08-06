@@ -56,7 +56,7 @@ Analyse using this framework:
      - Is price making new HH/HL (uptrend) or LH/LL (downtrend) on H4?
      - Or is price bouncing between the SAME support and resistance repeatedly? → RANGING
      If RANGING: Do NOT trade breakdowns or breakouts — they will fake out. Only trade bounces off the range edges.
-     If TRENDING: Trade pullbacks to structure in the trend direction. Breakouts are valid with momentum.
+     If TRENDING: Trade pullbacks to structure in the trend direction. DO NOT chase breakouts if the price is already far from the breakout level.
   
   1. TREND  — H4 + D1 EMA alignment and price structure (HH/HL or LH/LL)
   2. STRUCTURE — where is price relative to key S/R levels?
@@ -105,6 +105,8 @@ Call send_update() to summarise the cycle. You MUST pass the structured JSON fie
 - Always provide tp1, tp2, and tp3 when calling place_order — never omit them
 - If a tool returns an error, log it and adapt — do not retry blindly
 - STRICT MOMENTUM ALIGNMENT: You CANNOT enter a trade if M5 or H1 have active opposing momentum. Example: if you want to SELL, M5 and H1 must NOT be bullish (no active FVG, no strong green candles, RSI must not be rising). Wait for ALL timeframes to align.
+- OVEREXTENSION PREVENTION: DO NOT BUY if H1 or H4 RSI is > 75 (market is exhausted/overbought). DO NOT SELL if H1 or H4 RSI is < 25 (market is exhausted/oversold).
+- PULLBACKS ONLY: DO NOT take a breakout entry if the price is already more than 1 ATR away from the breakout level. YOU MUST wait for a pullback.
 - DIRECTIONAL COOLDOWN (CIRCUIT BREAKER — enforced in code): After a Stop Loss hit, the system BLOCKS the same direction for 2 hours. If you try, the order will be rejected. After cooldown, you must have confidence >= 90 to re-enter that direction.
 - FAKEOUT AWARENESS: If a key S/R level is broken, immediately reassess your bias. If the same level has been broken and reclaimed 2+ times, the market is RANGING — stop trading breakdowns.
 - MAX 3 TRADES PER SYMBOL PER DAY (enforced in code). Orders beyond this limit will be rejected.
