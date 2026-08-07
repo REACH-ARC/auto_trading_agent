@@ -46,7 +46,7 @@ async def fetch_latest_gold_news() -> list[dict]:
                                 articles.append({
                                     "title": item['title'],
                                     "url": f"https://www.kitco.com{item['urlAlias']}",
-                                    "summary": item.get('teaser', '') or item.get('summary', '') or item.get('description', '')
+                                    "summary": item.get('teaserSnippet', '') or item.get('teaserHeadline', '') or item.get('teaser', '') or ''
                                 })
                         break
             return articles
